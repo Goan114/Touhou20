@@ -15,6 +15,7 @@
 #include "../text_renderer/text.hpp"
 #include "../stone_menu/stone.hpp"
 #include "../sprite_renderer/loading_interrupt.hpp"
+#include "../sprite_renderer/render_mesh.hpp"
 namespace th20::source::gameplay {
 namespace pe=program_entry;
 namespace {
@@ -34,7 +35,7 @@ void enable_objects(bool initial){
     enable(c.objects_04[5]);enable(c.objects_04[6]);enable(c.objects_04[3]);
     if(initial)enable(c.objects_04[7]);
 }
-void hide_loading(){interrupt(text::renderer->loading_handle);text::renderer->loading_handle=0;}
+void hide_loading(){auto& handle=text::renderer->loading_handle;interrupt(handle);if(auto* animation=sprite::find_animation(*pe::sprite_controller,handle))sprite::hide_animation_tree(*animation);sprite::request_animation_deletion(*pe::sprite_controller,handle);}
 }
 int start_game_frame(GameController& game){
     game.game_flags|=0x04000000u;

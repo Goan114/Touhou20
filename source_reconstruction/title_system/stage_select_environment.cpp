@@ -15,7 +15,11 @@ namespace th20::source::title {
 std::array<std::uint8_t,256> shortcut_keyboard{};
 int read_shortcut_keyboard(std::span<std::uint8_t,256> keys){
     std::fill(keys.begin(),keys.end(),std::uint8_t{0});if(!program_entry::window_state.active)return 0;
+#ifdef TH_SDL3
+    return input::read_scan_keyboard(keys.data());
+#else
     auto* keyboard=input::controller->keyboard;const auto result=keyboard->GetDeviceState(256,keys.data());if(result!=0)keyboard->Acquire();return 1;
+#endif
 }
 int read_shortcut_keyboard(){return read_shortcut_keyboard(shortcut_keyboard);}
 namespace {

@@ -31,7 +31,14 @@ std::int32_t scale_dimension(std::int32_t dimension,float scale) {
 }
 template<class T>T read(const std::uint8_t* memory) {T value;std::memcpy(&value,memory,sizeof(T));return value;}
 bool downsample(const TextureRecord& record,float scale) {
+#ifdef TH_SDL3
+    // Logical game coordinates do not describe the output pixel density.
+    // Keep the original atlas texels at every window size; sprite descriptors
+    // already derive logical extents independently from the texture dimensions.
+    return false;
+#else
     return reinterpret_cast<const std::uint8_t*>(record.header)[0x22]!=0&&scale<2.f;
+#endif
 }
 }
 int create_embedded_texture(TextureRecord& record,const std::uint8_t* thtx,UINT format,

@@ -14,6 +14,12 @@ EM_JS(int, touhou_clip_control, (), {
   const e=GL.currentContext.GLctx.getExtension('EXT_clip_control');
   if(e)e.clipControlEXT(e.LOWER_LEFT_EXT,e.ZERO_TO_ONE_EXT);return !!e;
 });
+EM_JS(int, touhou_output_units, (), {
+  const canvas=Module.canvas;
+  if(!canvas)return 160;
+  const r=canvas.getBoundingClientRect(),d=window.devicePixelRatio||1;
+  return Math.max(80,Math.min(640,Math.round(Math.min(r.width*d/4,r.height*d/3))));
+});
 namespace touhou::sdl {
 namespace {
 Renderer* active=nullptr;
@@ -57,12 +63,43 @@ bool equal(const State& a,const State& b,bool world=false){
 Renderer* current(){return active;}void set_current(Renderer* r){active=r;}
 State::State(){for(auto& m:matrix)m=identity;}
 Renderer::Renderer(int v,Resolve r,void* p):version(v),resolve(r),owner(p){}
+u32 Renderer::refresh_output_size(){
+ if(version!=20)return 1;
+ const int units=touhou_output_units(),width=units*4,height=units*3;
+ int oldWidth=0,oldHeight=0;SDL_GetWindowSizeInPixels(window,&oldWidth,&oldHeight);
+ if(oldWidth!=width||oldHeight!=height)SDL_SetWindowSize(window,width,height);
+ // Render at or above the requested density. Integer density preserves exact
+ // logical texel boundaries throughout the original multi-pass compositor.
+ return u32((width+639)/640);
+}
+void Renderer::resize_surface(u32 id,u32 previousScale){
+ flush();const auto s=resolve(owner,id);
+ auto depth=depths.find(id);
+ if(depth!=depths.end()){
+  glDeleteRenderbuffers(1,&depth->second.buffer);depths.erase(depth);
+  for(auto& entry:surfaces)entry.second.attached=~0u;
+ }
+ auto it=surfaces.find(id);if(it==surfaces.end())return;
+ auto& g=it->second;GLuint texture=0,framebuffer=0;
+ glGenTextures(1,&texture);bind_texture(texture);
+ glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,s.width*s.pixelScale,s.height*s.pixelScale,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+ glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+ glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+ glGenFramebuffers(1,&framebuffer);bind_framebuffer(GL_DRAW_FRAMEBUFFER,framebuffer);
+ glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,texture,0);
+ bind_framebuffer(GL_READ_FRAMEBUFFER,g.framebuffer);glDisable(GL_SCISSOR_TEST);
+ glBlitFramebuffer(0,0,s.width*previousScale,s.height*previousScale,0,0,s.width*s.pixelScale,s.height*s.pixelScale,GL_COLOR_BUFFER_BIT,GL_LINEAR);
+ glDeleteTextures(1,&g.texture);glDeleteFramebuffers(1,&g.framebuffer);
+ g.texture=texture;g.framebuffer=framebuffer;g.attached=~0u;g.sampler={};
+ boundTexture=readFramebuffer=drawFramebuffer=~0u;
+}
 bool Renderer::initialize(){
  if(!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_EVENTS)){failure=SDL_GetError();return false;}
  SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,SDL_GL_CONTEXT_PROFILE_ES);SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION,3);SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION,0);
  SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE,0);SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,0);SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE,0);SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);
- window=SDL_CreateWindow(version==8?"Touhou 08":version==20?"Touhou 20":"Touhou 10",640,480,SDL_WINDOW_OPENGL);if(!window){failure=SDL_GetError();return false;}
- SDL_SetWindowSize(window,640,480);
+ const int outputWidth=version==20?1280:640,outputHeight=version==20?960:480;
+ window=SDL_CreateWindow(version==8?"Touhou 08":version==20?"Touhou 20":"Touhou 10",outputWidth,outputHeight,SDL_WINDOW_OPENGL);if(!window){failure=SDL_GetError();return false;}
+ SDL_SetWindowSize(window,outputWidth,outputHeight);
  context=SDL_GL_CreateContext(window);if(!context){failure=SDL_GetError();return false;}SDL_GL_SetSwapInterval(1);drawState=DrawStateCache{};
  std::string source=vertexSource;if((version==10||version==20)&&touhou_clip_control()){replace(source,"position.z*2.0-1.0","position.z");replace(source,"gl_Position.z=gl_Position.z*2.0-gl_Position.w;","");}
  vertex=shader(GL_VERTEX_SHADER,source);glGenBuffers(1,&vertices.id);glGenBuffers(1,&indices.id);glGenBuffers(1,&instances.id);
@@ -141,10 +178,16 @@ Renderer::GPU& Renderer::surface(u32 h){
     u8* out=pixels.data()+(y*s.width+x)*channels;out[0]=r;out[1]=gc;out[2]=b;if(!rgb)out[3]=a;
    }format=rgb?GL_RGB:GL_RGBA;internal=s.format==PixelFormat::Rgb565?GL_RGB565:(s.format==PixelFormat::Xrgb1555||s.format==PixelFormat::Argb1555)?GL_RGB5_A1:rgb?GL_RGB8:GL_RGBA8;
   }
-  if(g.version==~0u)glTexImage2D(GL_TEXTURE_2D,0,internal,s.width,s.height,0,format,type,pixels.data());else glTexSubImage2D(GL_TEXTURE_2D,0,0,0,s.width,s.height,format,type,pixels.data());g.version=s.version;g.rendered=false;
+  if(s.pixelScale>1){
+   const u32 bytesPerPixel=type==GL_UNSIGNED_SHORT_4_4_4_4?2:channels;
+   const auto logical=pixels;pixels.resize(s.width*s.height*s.pixelScale*s.pixelScale*bytesPerPixel);
+   for(u32 y=0;y<s.height*s.pixelScale;++y)for(u32 x=0;x<s.width*s.pixelScale;++x)
+    std::memcpy(pixels.data()+(y*s.width*s.pixelScale+x)*bytesPerPixel,logical.data()+((y/s.pixelScale)*s.width+x/s.pixelScale)*bytesPerPixel,bytesPerPixel);
+  }
+  if(g.version==~0u)glTexImage2D(GL_TEXTURE_2D,0,internal,s.width*s.pixelScale,s.height*s.pixelScale,0,format,type,pixels.data());else glTexSubImage2D(GL_TEXTURE_2D,0,0,0,s.width*s.pixelScale,s.height*s.pixelScale,format,type,pixels.data());g.version=s.version;g.rendered=false;
  }return g;
 }
-Renderer::GPU& Renderer::target(u32 id,u32 depthId){auto& g=surface(id);GLuint buffer=0;bool stencil=false;if(depthId){auto& d=depths[depthId];if(!d.buffer){auto s=resolve(owner,depthId);d.stencil=s.format==PixelFormat::Depth24Stencil8;glGenRenderbuffers(1,&d.buffer);glBindRenderbuffer(GL_RENDERBUFFER,d.buffer);glRenderbufferStorage(GL_RENDERBUFFER,d.stencil?GL_DEPTH24_STENCIL8:s.format==PixelFormat::Depth16?GL_DEPTH_COMPONENT16:GL_DEPTH_COMPONENT24,s.width,s.height);}buffer=d.buffer;stencil=d.stencil;}bind_framebuffer(GL_FRAMEBUFFER,g.framebuffer);if(g.attached!=buffer){glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,buffer);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_STENCIL_ATTACHMENT,GL_RENDERBUFFER,stencil?buffer:0);g.attached=buffer;}return g;}
+Renderer::GPU& Renderer::target(u32 id,u32 depthId){auto& g=surface(id);GLuint buffer=0;bool stencil=false;if(depthId){auto& d=depths[depthId];if(!d.buffer){auto s=resolve(owner,depthId);d.stencil=s.format==PixelFormat::Depth24Stencil8;glGenRenderbuffers(1,&d.buffer);glBindRenderbuffer(GL_RENDERBUFFER,d.buffer);glRenderbufferStorage(GL_RENDERBUFFER,d.stencil?GL_DEPTH24_STENCIL8:s.format==PixelFormat::Depth16?GL_DEPTH_COMPONENT16:GL_DEPTH_COMPONENT24,s.width*s.pixelScale,s.height*s.pixelScale);}buffer=d.buffer;stencil=d.stencil;}bind_framebuffer(GL_FRAMEBUFFER,g.framebuffer);if(g.attached!=buffer){glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,buffer);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_STENCIL_ATTACHMENT,GL_RENDERBUFFER,stencil?buffer:0);g.attached=buffer;}return g;}
 void Renderer::prepare(u32 h){surface(h);}
 void Renderer::draw(Topology primitive,u32 count,const void* data,u32 stride,const void* index,IndexType indexFormat){
  stats.calls++;state.stride=stride;
@@ -161,12 +204,14 @@ void Renderer::issue(const State& d,Topology primitive,u32 count,const void* dat
  stats.batches++;const auto& p=d.pipeline;auto& cached=drawState.pipeline;const bool all=!drawState.valid;
  if(all||cached.dither!=p.dither)p.dither?glEnable(GL_DITHER):glDisable(GL_DITHER);
  GPU* texture=d.texture?&surface(d.texture):nullptr;auto& g=target(d.target,d.depth);const auto& v=d.viewport;
- if(!drawState.has_viewport||std::memcmp(&drawState.viewport,&v,sizeof(v))){glViewport(v.x,v.y,v.width,v.height);glDepthRangef(v.min,v.max);drawState.viewport=v;drawState.has_viewport=true;}select(d);
+ const auto scale=resolve(owner,d.target).pixelScale;
+ const Viewport physical{v.x*scale,v.y*scale,v.width*scale,v.height*scale,v.min,v.max};
+ if(!drawState.has_viewport||std::memcmp(&drawState.viewport,&physical,sizeof(physical))){glViewport(physical.x,physical.y,physical.width,physical.height);glDepthRangef(v.min,v.max);drawState.viewport=physical;drawState.has_viewport=true;}select(d);
  float vp[]{float(v.x),float(v.y),float(v.width),float(v.height)};uniform(0,4,vp);const bool transformed=d.layout.screen;
  integer(1,transformed);integer(2,p.textureTransform);integer(3,!!instance);for(int i=0;i<4;i++)uniform(4+i,16,d.matrix[i].data());
- integer(8,p.fog);integer(9,p.rangeFog);integer(10,u32(p.fogMode));float fog[]{p.fogNear,p.fogFar,p.fogDensity};uniform(11,3,fog);uniform(12,4,color(p.fogColor).data());integer(13,!!texture);uniform(14,4,color(p.textureFactor).data());
+integer(8,p.fog);integer(9,p.rangeFog);integer(10,u32(p.fogMode));float fog[]{p.fogNear,p.fogFar,p.fogDensity};uniform(11,3,fog);uniform(12,4,color(p.fogColor).data());integer(13,!!texture);uniform(14,4,color(p.textureFactor).data());
  auto arg=[](Argument a){return int(u32(a.source)|(a.complement?16u:0u)|(a.alphaOnly?32u:0u));};
- integer(15,u32(p.color.operation));integer(16,arg(p.color.first));integer(17,arg(p.color.second));integer(18,u32(p.alpha.operation));integer(19,arg(p.alpha.first));integer(20,arg(p.alpha.second));integer(21,p.alphaTest);float alpha=float(p.alphaReference)/255;uniform(22,1,&alpha);integer(23,u32(p.alphaCompare));integer(24,(version==10||version==20)&&p.depthTest&&d.depth&&resolve(owner,d.depth).format==PixelFormat::Depth16);
+integer(15,u32(p.color.operation));integer(16,arg(p.color.first));integer(17,arg(p.color.second));integer(18,u32(p.alpha.operation));integer(19,arg(p.alpha.first));integer(20,arg(p.alpha.second));integer(21,p.alphaTest);float alpha=float(p.alphaReference)/255;uniform(22,1,&alpha);integer(23,u32(p.alphaCompare));integer(24,(version==10||version==20)&&p.depthTest&&d.depth&&resolve(owner,d.depth).format==PixelFormat::Depth16);
  if(texture){
   glActiveTexture(GL_TEXTURE0);bind_texture(texture->texture);
   constexpr GLint address[]{GL_REPEAT,GL_MIRRORED_REPEAT,GL_CLAMP_TO_EDGE};GLint sampler[]{address[u32(p.addressU)],address[u32(p.addressV)],p.minFilter==Filter::Nearest?GL_NEAREST:GL_LINEAR,p.magFilter==Filter::Nearest?GL_NEAREST:GL_LINEAR};
@@ -181,11 +226,12 @@ void Renderer::issue(const State& d,Topology primitive,u32 count,const void* dat
  // Set blend parameters even while blending is disabled, so the cache always
  // describes actual GL state when a subsequent batch enables it.
  constexpr GLenum blend[]{GL_ZERO,GL_ONE,GL_SRC_COLOR,GL_ONE_MINUS_SRC_COLOR,GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_DST_ALPHA,GL_ONE_MINUS_DST_ALPHA,GL_DST_COLOR,GL_ONE_MINUS_DST_COLOR,GL_SRC_ALPHA_SATURATE};
- if(p.separateAlphaBlend){if(all||cached.sourceBlend!=p.sourceBlend||cached.destinationBlend!=p.destinationBlend||cached.sourceBlendAlpha!=p.sourceBlendAlpha||cached.destinationBlendAlpha!=p.destinationBlendAlpha)glBlendFuncSeparate(blend[u32(p.sourceBlend)],blend[u32(p.destinationBlend)],blend[u32(p.sourceBlendAlpha)],blend[u32(p.destinationBlendAlpha)]);}
- else if(all||cached.sourceBlend!=p.sourceBlend||cached.destinationBlend!=p.destinationBlend||cached.sourceBlendAlpha!=p.sourceBlendAlpha||cached.destinationBlendAlpha!=p.destinationBlendAlpha)glBlendFunc(blend[u32(p.sourceBlend)],blend[u32(p.destinationBlend)]);
+ const bool blendModeChanged=all||cached.separateAlphaBlend!=p.separateAlphaBlend;
+ if(p.separateAlphaBlend){if(blendModeChanged||cached.sourceBlend!=p.sourceBlend||cached.destinationBlend!=p.destinationBlend||cached.sourceBlendAlpha!=p.sourceBlendAlpha||cached.destinationBlendAlpha!=p.destinationBlendAlpha)glBlendFuncSeparate(blend[u32(p.sourceBlend)],blend[u32(p.destinationBlend)],blend[u32(p.sourceBlendAlpha)],blend[u32(p.destinationBlendAlpha)]);}
+ else if(blendModeChanged||cached.sourceBlend!=p.sourceBlend||cached.destinationBlend!=p.destinationBlend||cached.sourceBlendAlpha!=p.sourceBlendAlpha||cached.destinationBlendAlpha!=p.destinationBlendAlpha)glBlendFunc(blend[u32(p.sourceBlend)],blend[u32(p.destinationBlend)]);
  constexpr GLenum equation[]{GL_FUNC_ADD,GL_FUNC_SUBTRACT,GL_FUNC_REVERSE_SUBTRACT,GL_MIN,GL_MAX};
- if(p.separateAlphaBlend){if(all||cached.blendEquation!=p.blendEquation||cached.blendEquationAlpha!=p.blendEquationAlpha)glBlendEquationSeparate(equation[u32(p.blendEquation)],equation[u32(p.blendEquationAlpha)]);}
- else if(all||cached.blendEquation!=p.blendEquation||cached.blendEquationAlpha!=p.blendEquationAlpha)glBlendEquation(equation[u32(p.blendEquation)]);
+ if(p.separateAlphaBlend){if(blendModeChanged||cached.blendEquation!=p.blendEquation||cached.blendEquationAlpha!=p.blendEquationAlpha)glBlendEquationSeparate(equation[u32(p.blendEquation)],equation[u32(p.blendEquationAlpha)]);}
+ else if(blendModeChanged||cached.blendEquation!=p.blendEquation||cached.blendEquationAlpha!=p.blendEquationAlpha)glBlendEquation(equation[u32(p.blendEquation)]);
  if(all||cached.cull!=p.cull){if(p.cull!=Cull::None){glEnable(GL_CULL_FACE);glFrontFace(GL_CW);glCullFace(p.cull==Cull::Back?GL_BACK:GL_FRONT);}else glDisable(GL_CULL_FACE);}
  if(all||cached.colorMask!=p.colorMask)glColorMask(!!(p.colorMask&1),!!(p.colorMask&2),!!(p.colorMask&4),!!(p.colorMask&8));
  cached=p;drawState.valid=true;
@@ -215,8 +261,12 @@ glEnableVertexAttribArray(0);glVertexAttribPointer(0,transformed?4:3,GL_FLOAT,fa
  else if(index){u32 b=upload(indices,GL_ELEMENT_ARRAY_BUFFER,index,n*(indexFormat==IndexType::UInt16?2:4),65536);glDrawElements(mode,n,indexFormat==IndexType::UInt16?GL_UNSIGNED_SHORT:GL_UNSIGNED_INT,reinterpret_cast<void*>(b));}
  else glDrawArrays(mode,0,n);g.rendered=true;
 }
-void Renderer::clear(u32 flags,u32 c,float depth,u32 stencil,const i32* rects,u32 count){flush();auto& g=target(state.target,state.depth);const auto& v=state.viewport;i32 box[]{i32(v.x),i32(v.y),i32(v.x+v.width),i32(v.y+v.height)};if(!rects){rects=box;count=1;}glEnable(GL_SCISSOR_TEST);glColorMask(true,true,true,true);glDepthMask(true);drawState.pipeline.colorMask=15;drawState.pipeline.depthWrite=true;auto rgba=color(c);glClearColor(rgba[0],rgba[1],rgba[2],rgba[3]);glClearDepthf(depth);glClearStencil(stencil);glStencilMask(255);GLbitfield bits=(flags&1?GL_COLOR_BUFFER_BIT:0)|(flags&2?GL_DEPTH_BUFFER_BIT:0)|(flags&4?GL_STENCIL_BUFFER_BIT:0);for(u32 i=0;i<count;i++){const i32* p=rects+i*4;glScissor(p[0],p[1],p[2]-p[0],p[3]-p[1]);glClear(bits);}glDisable(GL_SCISSOR_TEST);g.rendered=true;}
-void Renderer::copy(u32 src,const i32* rect,u32 dst,const i32* point){flush();auto& a=surface(src);auto& b=surface(dst);bind_framebuffer(GL_READ_FRAMEBUFFER,a.framebuffer);bind_framebuffer(GL_DRAW_FRAMEBUFFER,b.framebuffer);glDisable(GL_SCISSOR_TEST);glBlitFramebuffer(rect[0],rect[1],rect[2],rect[3],point[0],point[1],point[0]+rect[2]-rect[0],point[1]+rect[3]-rect[1],GL_COLOR_BUFFER_BIT,GL_NEAREST);b.rendered=true;b.version=resolve(owner,dst).version+1;}
+void Renderer::clear(u32 flags,u32 c,float depth,u32 stencil,const i32* rects,u32 count){flush();auto& g=target(state.target,state.depth);const auto& v=state.viewport;i32 box[]{i32(v.x),i32(v.y),i32(v.x+v.width),i32(v.y+v.height)};if(!rects){rects=box;count=1;}glEnable(GL_SCISSOR_TEST);glColorMask(true,true,true,true);glDepthMask(true);drawState.pipeline.colorMask=15;drawState.pipeline.depthWrite=true;auto rgba=color(c);glClearColor(rgba[0],rgba[1],rgba[2],rgba[3]);glClearDepthf(depth);glClearStencil(stencil);glStencilMask(255);GLbitfield bits=(flags&1?GL_COLOR_BUFFER_BIT:0)|(flags&2?GL_DEPTH_BUFFER_BIT:0)|(flags&4?GL_STENCIL_BUFFER_BIT:0);for(u32 i=0;i<count;i++){const i32* p=rects+i*4;const auto scale=resolve(owner,state.target).pixelScale;glScissor(p[0]*scale,p[1]*scale,(p[2]-p[0])*scale,(p[3]-p[1])*scale);glClear(bits);}glDisable(GL_SCISSOR_TEST);g.rendered=true;}
+void Renderer::copy(u32 src,const i32* rect,u32 dst,const i32* point){
+ const i32 to[]{point[0],point[1],point[0]+rect[2]-rect[0],point[1]+rect[3]-rect[1]};
+ blit(src,rect,dst,to);
+}
+void Renderer::blit(u32 src,const i32* rect,u32 dst,const i32* to){flush();auto& a=surface(src);auto& b=surface(dst);bind_framebuffer(GL_READ_FRAMEBUFFER,a.framebuffer);bind_framebuffer(GL_DRAW_FRAMEBUFFER,b.framebuffer);glDisable(GL_SCISSOR_TEST);const auto ss=resolve(owner,src).pixelScale,ds=resolve(owner,dst).pixelScale;glBlitFramebuffer(rect[0]*ss,rect[1]*ss,rect[2]*ss,rect[3]*ss,to[0]*ds,to[1]*ds,to[2]*ds,to[3]*ds,GL_COLOR_BUFFER_BIT,GL_LINEAR);b.rendered=true;b.version=resolve(owner,dst).version+1;}
 bool Renderer::resample(u32 src,const i32* from,u32 dst,const i32* to,const float* weights,u32 width,u32 height){
  if(src==dst)return false;
  auto masks=[](PixelFormat f)->std::array<GLint,4>{switch(f){case PixelFormat::Bgra8:return {255,255,255,255};case PixelFormat::Bgrx8:return {255,255,255,0};case PixelFormat::Rgb565:return {31,63,31,0};case PixelFormat::Xrgb1555:return {31,31,31,0};case PixelFormat::Argb1555:return {31,31,31,1};case PixelFormat::Argb4444:return {15,15,15,15};default:return {};}};
@@ -224,7 +274,8 @@ bool Renderer::resample(u32 src,const i32* from,u32 dst,const i32* to,const floa
  flush();auto& input=surface(src);auto& output=target(dst,0);
  glUseProgram(resampleProgram);currentProgram=resampleProgram;glBindVertexArray(resampleVao);currentLayout=resampleVao;
  glDisable(GL_BLEND);glDisable(GL_DEPTH_TEST);glDisable(GL_CULL_FACE);glDisable(GL_SCISSOR_TEST);glDisable(GL_DITHER);glColorMask(true,true,true,true);glDepthMask(false);
- glViewport(to[0],to[1],to[2]-to[0],to[3]-to[1]);
+ glViewport(to[0]*b.pixelScale,to[1]*b.pixelScale,(to[2]-to[0])*b.pixelScale,(to[3]-to[1])*b.pixelScale);
+ glUniform1i(glGetUniformLocation(resampleProgram,"sourceScale"),a.pixelScale);glUniform1i(glGetUniformLocation(resampleProgram,"destinationScale"),b.pixelScale);
  glActiveTexture(GL_TEXTURE0);bind_texture(input.texture);glUniform1i(glGetUniformLocation(resampleProgram,"sourceImage"),0);
  glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,weightTexture);
  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
@@ -239,7 +290,18 @@ bool Renderer::resample(u32 src,const i32* from,u32 dst,const i32* to,const floa
  // valid VAOs, while the regular draw cache must restore all pipeline state.
  drawState=DrawStateCache{};output.rendered=true;output.version=b.version+1;++stats.resamples;return true;
 }
-void Renderer::read(u32 id){flush();auto it=surfaces.find(id);if(it==surfaces.end()||!it->second.rendered)return;auto s=resolve(owner,id);auto& g=it->second;stats.readBytes+=s.size;pixels.resize(s.width*s.height*4);bind_framebuffer(GL_FRAMEBUFFER,g.framebuffer);glPixelStorei(GL_PACK_ALIGNMENT,1);glReadPixels(0,0,s.width,s.height,GL_RGBA,GL_UNSIGNED_BYTE,pixels.data());
+void Renderer::read(u32 id){flush();auto it=surfaces.find(id);if(it==surfaces.end()||!it->second.rendered)return;auto s=resolve(owner,id);auto& g=it->second;stats.readBytes+=s.size;pixels.resize(s.width*s.height*4);bind_framebuffer(GL_FRAMEBUFFER,g.framebuffer);glPixelStorei(GL_PACK_ALIGNMENT,1);
+ GLuint readTexture=0,readFramebufferTemporary=0;
+ if(s.pixelScale>1){
+  glGenTextures(1,&readTexture);bind_texture(readTexture);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,s.width,s.height,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+  glGenFramebuffers(1,&readFramebufferTemporary);bind_framebuffer(GL_DRAW_FRAMEBUFFER,readFramebufferTemporary);glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,readTexture,0);
+  bind_framebuffer(GL_READ_FRAMEBUFFER,g.framebuffer);glDisable(GL_SCISSOR_TEST);
+  glBlitFramebuffer(0,0,s.width*s.pixelScale,s.height*s.pixelScale,0,0,s.width,s.height,GL_COLOR_BUFFER_BIT,GL_LINEAR);
+  bind_framebuffer(GL_READ_FRAMEBUFFER,readFramebufferTemporary);
+ }
+ glReadPixels(0,0,s.width,s.height,GL_RGBA,GL_UNSIGNED_BYTE,pixels.data());
+ if(readFramebufferTemporary){glDeleteFramebuffers(1,&readFramebufferTemporary);glDeleteTextures(1,&readTexture);boundTexture=readFramebuffer=drawFramebuffer=~0u;}
+
  for(u32 y=0;y<s.height;y++)for(u32 x=0;x<s.width;x++){const auto* p=pixels.data()+(y*s.width+x)*4;u32 r=p[0],gc=p[1],b=p[2],a=p[3];auto* out=s.data+y*s.pitch;
   if(s.format==PixelFormat::Bgra8||s.format==PixelFormat::Bgrx8){out+=x*4;out[0]=b;out[1]=gc;out[2]=r;out[3]=s.format==PixelFormat::Bgra8?a:255;}else if((s.format==PixelFormat::Rgb565||s.format==PixelFormat::Xrgb1555||s.format==PixelFormat::Argb1555||s.format==PixelFormat::Argb4444)){uint16_t n=s.format==PixelFormat::Argb4444?(a>>4)<<12|(r>>4)<<8|(gc>>4)<<4|(b>>4):s.format==PixelFormat::Rgb565?(r>>3)<<11|(gc>>2)<<5|(b>>3):(s.format==PixelFormat::Argb1555&&a>=128?0x8000:0)|(r>>3)<<10|(gc>>3)<<5|(b>>3);std::memcpy(out+x*2,&n,2);}else if(s.format==PixelFormat::Alpha8)out[x]=a;else if(s.format==PixelFormat::Luminance8)out[x]=r;else std::abort();
  }g.rendered=false;
@@ -261,7 +323,8 @@ void Renderer::render_imgui(const ImDrawData* data,u32 targetHandle){
  if(!imguiFontTexture){unsigned char* pixels=nullptr;int width=0,height=0;io.Fonts->GetTexDataAsRGBA32(&pixels,&width,&height);if(!pixels||width<=0||height<=0)return;
   glGenTextures(1,&imguiFontTexture);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,imguiFontTexture);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);glPixelStorei(GL_UNPACK_ALIGNMENT,1);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,width,height,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels);io.Fonts->TexID=reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(imguiFontTexture));io.Fonts->ClearTexData();
  }
- bind_framebuffer(GL_FRAMEBUFFER,output.framebuffer);glViewport(0,0,640,480);glEnable(GL_BLEND);glBlendEquationSeparate(GL_FUNC_ADD,GL_FUNC_ADD);glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);glDisable(GL_CULL_FACE);glDisable(GL_DEPTH_TEST);glDepthMask(GL_FALSE);glEnable(GL_SCISSOR_TEST);glUseProgram(imguiProgram);glActiveTexture(GL_TEXTURE0);glBindVertexArray(imguiVao);glBindBuffer(GL_ARRAY_BUFFER,imguiVbo);glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,imguiEbo);glUniform1i(imguiTexture,0);
+ const auto targetSize=resolve(owner,targetHandle);
+ bind_framebuffer(GL_FRAMEBUFFER,output.framebuffer);glViewport(0,0,targetSize.width*targetSize.pixelScale,targetSize.height*targetSize.pixelScale);glEnable(GL_BLEND);glBlendEquationSeparate(GL_FUNC_ADD,GL_FUNC_ADD);glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);glDisable(GL_CULL_FACE);glDisable(GL_DEPTH_TEST);glDepthMask(GL_FALSE);glEnable(GL_SCISSOR_TEST);glUseProgram(imguiProgram);glActiveTexture(GL_TEXTURE0);glBindVertexArray(imguiVao);glBindBuffer(GL_ARRAY_BUFFER,imguiVbo);glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,imguiEbo);glUniform1i(imguiTexture,0);
  const ImVec2 clipOffset=data->DisplayPos,clipScale=data->FramebufferScale;const float displayWidth=data->DisplaySize.x*clipScale.x,displayHeight=data->DisplaySize.y*clipScale.y,left=data->DisplayPos.x,right=left+data->DisplaySize.x,top=data->DisplayPos.y,bottom=top+data->DisplaySize.y;
  // The backbuffer is presented with a vertical flip (see commit()), so draw
  // ImGui pre-flipped: mirror the projection Y and skip the GL-origin scissor
@@ -271,7 +334,7 @@ void Renderer::render_imgui(const ImDrawData* data,u32 targetHandle){
  for(int listIndex=0;listIndex<data->CmdListsCount;++listIndex){const auto* list=data->CmdLists[listIndex];const GLsizeiptr vertexBytes=GLsizeiptr(list->VtxBuffer.Size*sizeof(ImDrawVert)),indexBytes=GLsizeiptr(list->IdxBuffer.Size*sizeof(ImDrawIdx));glBufferSubData(GL_ARRAY_BUFFER,vertexOffset,vertexBytes,list->VtxBuffer.Data);glBufferSubData(GL_ELEMENT_ARRAY_BUFFER,indexOffset,indexBytes,list->IdxBuffer.Data);
   for(int commandIndex=0;commandIndex<list->CmdBuffer.Size;++commandIndex){const auto& command=list->CmdBuffer[commandIndex];if(command.UserCallback){if(command.UserCallback==ImDrawCallback_ResetRenderState){glUseProgram(imguiProgram);glBindVertexArray(imguiVao);glUniformMatrix4fv(imguiProjMtx,1,GL_FALSE,&projection[0][0]);}else command.UserCallback(list,&command);continue;}
    ImVec4 clip{(command.ClipRect.x-clipOffset.x)*clipScale.x,(command.ClipRect.y-clipOffset.y)*clipScale.y,(command.ClipRect.z-clipOffset.x)*clipScale.x,(command.ClipRect.w-clipOffset.y)*clipScale.y};if(clip.x>=clip.z||clip.y>=clip.w||clip.z<=0||clip.w<=0||clip.x>=displayWidth||clip.y>=displayHeight)continue;
-   const GLint x=GLint(std::floor(std::max(clip.x,0.0f))),y=GLint(std::floor(std::max(clip.y,0.0f)));const GLsizei width=GLsizei(std::ceil(std::min(clip.z,displayWidth))-x),height=GLsizei(std::ceil(std::min(clip.w,displayHeight))-y);if(width<=0||height<=0)continue;glScissor(x,y,width,height);
+   const GLint x=GLint(std::floor(std::max(clip.x,0.0f))),y=GLint(std::floor(std::max(clip.y,0.0f)));const GLsizei width=GLsizei(std::ceil(std::min(clip.z,displayWidth))-x),height=GLsizei(std::ceil(std::min(clip.w,displayHeight))-y);if(width<=0||height<=0)continue;glScissor(x*targetSize.pixelScale,y*targetSize.pixelScale,width*targetSize.pixelScale,height*targetSize.pixelScale);
    const GLuint texture=command.TextureId?GLuint(reinterpret_cast<uintptr_t>(command.TextureId)):imguiFontTexture;glBindTexture(GL_TEXTURE_2D,texture);const auto base=vertexOffset+GLsizeiptr(command.VtxOffset*sizeof(ImDrawVert));glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,sizeof(ImDrawVert),reinterpret_cast<void*>(base+offsetof(ImDrawVert,pos)));glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(ImDrawVert),reinterpret_cast<void*>(base+offsetof(ImDrawVert,uv)));glVertexAttribPointer(2,4,GL_UNSIGNED_BYTE,GL_TRUE,sizeof(ImDrawVert),reinterpret_cast<void*>(base+offsetof(ImDrawVert,col)));glDrawElements(GL_TRIANGLES,GLsizei(command.ElemCount),sizeof(ImDrawIdx)==2?GL_UNSIGNED_SHORT:GL_UNSIGNED_INT,reinterpret_cast<void*>(indexOffset+GLsizeiptr(command.IdxOffset*sizeof(ImDrawIdx))));
   }vertexOffset+=vertexBytes;indexOffset+=indexBytes;
  }
@@ -282,7 +345,7 @@ void Renderer::render_imgui(const ImDrawData* data,u32 targetHandle){
  output.rendered=true;drawState=DrawStateCache{};currentProgram=0;currentLayout=0;boundTexture=readFramebuffer=drawFramebuffer=~0u;glDepthMask(GL_TRUE);
 }
 void Renderer::present(u32 id){flush();pending=id;stats.frames++;if(!defer)commit();}
-bool Renderer::commit(){if(!pending)return false;auto s=resolve(owner,pending);auto& g=surface(pending);pending=0;bind_framebuffer(GL_READ_FRAMEBUFFER,g.framebuffer);bind_framebuffer(GL_DRAW_FRAMEBUFFER,0);glDisable(GL_SCISSOR_TEST);glBlitFramebuffer(0,0,s.width,s.height,0,480,640,0,GL_COLOR_BUFFER_BIT,GL_NEAREST);SDL_GL_SwapWindow(window);stats.presentations++;return true;}
+bool Renderer::commit(){if(!pending)return false;auto s=resolve(owner,pending);auto& g=surface(pending);pending=0;bind_framebuffer(GL_READ_FRAMEBUFFER,g.framebuffer);bind_framebuffer(GL_DRAW_FRAMEBUFFER,0);glDisable(GL_SCISSOR_TEST);int width=0,height=0;SDL_GetWindowSizeInPixels(window,&width,&height);if(width<=0||height<=0){width=s.width;height=s.height;}glBlitFramebuffer(0,0,s.width*s.pixelScale,s.height*s.pixelScale,0,height,width,0,GL_COLOR_BUFFER_BIT,GL_NEAREST);SDL_GL_SwapWindow(window);stats.presentations++;return true;}
 }
 extern "C" {
 const touhou::sdl::Statistics* sdl_stats(){static touhou::sdl::Statistics zero{};return touhou::sdl::current()?&touhou::sdl::current()->stats:&zero;}

@@ -34,8 +34,19 @@ HRESULT WaveReader::open_memory(const std::uint8_t* bytes,std::uint32_t size,Tra
 }
 HRESULT WaveReader::reopen(TrackFormat* format,std::uint32_t position,std::uint32_t base_offset) {
     if(memory_mode) return E_FAIL;
+#ifdef TH_SDL3
+    // The browser file host uses zero for a closed handle. The Win32 sentinel
+    // is INVALID_HANDLE_VALUE; checking only that value leaves a closed OGG
+    // stream permanently silent after a resource change.
+    if(!file) open_file(filename,format,1,base_offset);
+#else
     if(file==INVALID_HANDLE_VALUE) open_file(filename,format,1,base_offset);
+#endif
+#ifdef TH_SDL3
+    if(!file) return E_FAIL;
+#else
     if(file==INVALID_HANDLE_VALUE) return E_FAIL;
+#endif
     looped=0;track=format;reset(false,position,base_offset);initial_remaining=remaining;return S_OK;
 }
 HRESULT WaveReader::read(void* output,std::uint32_t requested,std::uint32_t* received) {

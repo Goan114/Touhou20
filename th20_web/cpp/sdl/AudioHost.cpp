@@ -280,7 +280,12 @@ std::uint32_t render_frames(float* out, std::uint32_t count) {
     while (done < count) {
         ma_uint64 frames = 0;
         const auto wanted = std::min<std::uint32_t>(Host::chunk, count - done);
-        if (ma_engine_read_pcm_frames(&host.engine, out + done * 2, wanted, &frames) != MA_SUCCESS) { host.error = 3; break; }
+        const auto result = ma_engine_read_pcm_frames(&host.engine, out + done * 2, wanted, &frames);
+        if (result != MA_SUCCESS && result != MA_AT_END) { host.error = 3; break; }
+        if (frames < wanted) {
+            std::memset(out + (done + frames) * 2, 0, (wanted - frames) * 2 * sizeof(float));
+            frames = wanted;
+        }
         done += std::uint32_t(frames);
         // Service refill notifications between mixer slices. A single delayed
         // display callback must not collapse several ring notifications.

@@ -10,6 +10,7 @@
 #include "../sprite_renderer/animation_file.hpp"
 #include "../sprite_renderer/pool.hpp"
 #include "../sprite_renderer/loading_interrupt.hpp"
+#include "../sprite_renderer/render_mesh.hpp"
 #include "../runtime_state/state.hpp"
 #include "../progress_state/manager.hpp"
 #include "../audio_runtime/audio.hpp"
@@ -37,7 +38,7 @@ struct Environment final:FrameEnvironment {
     void enable_stones()override{stone_menu::controller->enable_callbacks();}
     void release_mesh(sprite::RenderMesh* p)override{sprite::destroy_render_mesh(p);}
     void hide_file(int index)override{sprite::mark_file_animations(*pe::sprite_controller,pe::sprite_controller->files[index],false);}
-    void clear_loading()override{sprite::interrupt_animation_children(*pe::sprite_controller,text::renderer->loading_handle,1);text::renderer->loading_handle=0;}
+    void clear_loading()override{auto& handle=text::renderer->loading_handle;sprite::interrupt_animation_children(*pe::sprite_controller,handle,1);if(auto* animation=sprite::find_animation(*pe::sprite_controller,handle))sprite::hide_animation_tree(*animation);sprite::request_animation_deletion(*pe::sprite_controller,handle);}
     void background(TitleInf& o)override{initialize_background(o);}
     void transition_effect()override{screen::create_effect(9,30,0,0,0,109);}
     void request_scene(int scene)override{gameplay::request_scene(scene);}

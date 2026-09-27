@@ -69,6 +69,9 @@ public:
     virtual HRESULT device_state(IDirectInputDevice8W*, DIJOYSTATE2*);
 };
 Host& win32_host();
+#ifdef TH_SDL3
+int read_scan_keyboard(std::uint8_t* output);
+#endif
 struct LegacyState {
     ButtonState slots[4]{};                 // original 0x5b88b0, stride 0x2c0
     ButtonState previous_slots[4]{};        // original 0x5b93b0

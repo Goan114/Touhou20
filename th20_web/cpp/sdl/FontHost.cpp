@@ -35,7 +35,7 @@ void blend_glyph(Pen& pen, FT_Face face, int left) {
         if (y < 0 || y >= pen.rows) continue;
         for (unsigned col = 0; col < slot->bitmap.width; ++col) {
             const int x = left + int(col);
-            if (x < 0) continue;
+            if (x < 0 || x >= pen.pitch / 4) continue;
             const unsigned coverage = slot->bitmap.buffer[row * slot->bitmap.pitch + col];
             if (!coverage) continue;
             auto* dst = pen.bgra + y * pen.pitch + x * 4;

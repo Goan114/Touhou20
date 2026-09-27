@@ -5,6 +5,9 @@
 // state; APIs that have no browser meaning report honest absence (XInput and
 // WinMM joysticks stay unconnected).
 #include "../../../source_reconstruction/input/input.hpp"
+#include "../../../source_reconstruction/game_session/session.hpp"
+#include "../../../source_reconstruction/player_entity/owner.hpp"
+#include "../../../source_reconstruction/hud_system/hud.hpp"
 namespace th20::source::gameplay { class GameController; extern GameController* controller; }
 #include "../platform/Time.hpp"
 #include "../../../portable/input/TouchController.hpp"
@@ -45,8 +48,18 @@ void press(std::uint8_t* out, std::uint32_t vk) { out[vk] |= 0x80; }
 // Scene adapter for gesture context: gameplay when a GameController exists.
 touhou::input::TouchState touch_state() {
     touhou::input::TouchState s;
-    s.context = gameplay::controller ? 1 : 0;
-    s.ready = s.context == 1; // keys and stick work; absolute drag needs player anchors
+    s.context = gameplay::controller ? (hud::controller && hud::controller->collecting ? 2 : 1) : 0;
+    if (s.context == 1) {
+        auto* player = static_cast<player_entity::Player*>(game_session::context(0).objects_04[0]);
+        if (player && player->state == 1) {
+            s.ready = true;
+            s.instance = static_cast<int>(reinterpret_cast<std::uintptr_t>(player));
+            s.x = player->position_614.x;
+            s.y = player->position_614.y;
+            s.fast = float(player->speeds_20b4[0]) / 128.f;
+            s.slow = float(player->speeds_20b4[1]) / 128.f;
+        }
+    }
     s.min_x = -184; s.max_x = 184; s.min_y = 32; s.max_y = 432;
     return s;
 }
@@ -132,6 +145,15 @@ HRESULT Host::device_state(IDirectInputDevice8W* device, DIJOYSTATE2* output) { 
 
 Host& sdl_input_host() { return sdl_host; }
 
+int read_scan_keyboard(std::uint8_t* output) {
+    std::memset(output, 0, 256);
+    const bool* physical = SDL_GetKeyboardState(nullptr);
+    for (const auto& key : keyboard_map)
+        if (key.scan < 256 && ((key.native != SDL_SCANCODE_UNKNOWN && physical[key.native]) || key.hosted))
+            output[key.scan] = 0x80;
+    return 1;
+}
+
 // Called once per game tick by the frame loop (the sdl_native_input role).
 void sample_native_input() {
     pump_events();
@@ -139,7 +161,17 @@ void sample_native_input() {
     const auto sample = gestures.sample(state, SDL_GetTicks(), (synthetic_keys[16] & 0x80) != 0,
         (synthetic_keys[37] | synthetic_keys[38] | synthetic_keys[39] | synthetic_keys[40]) & 0x80);
     std::memcpy(touch_keys, sample.keys, sizeof(touch_keys));
-    (void)sample.motion; // absolute-drag movement has no analog channel in TH20 (documented)
+    // TH20 consumes digital directions. Resolve the shared controller's drag
+    // target against the live player at the same input sample as keyboard.
+    if (sample.motion && state.ready) {
+        const float speed = std::max(1.f, sample.keys[16] ? state.slow : state.fast);
+        const float deadzone = speed * .45f;
+        const float dx = sample.x - state.x, dy = sample.y - state.y;
+        if (dx < -deadzone) touch_keys[37] = true;
+        if (dx > deadzone) touch_keys[39] = true;
+        if (dy < -deadzone) touch_keys[38] = true;
+        if (dy > deadzone) touch_keys[40] = true;
+    }
 }
 
 void initialize_input_host() {
@@ -177,6 +209,18 @@ __attribute__((export_name("sdl_touch"))) void sdl_touch(std::uint32_t type, std
     th20::source::input::gestures.pointer(int(type), id, x, y, SDL_GetTicks(), th20::source::input::touch_state(), false);
 }
 __attribute__((export_name("sdl_touch_cancel"))) void sdl_touch_cancel() { th20::source::input::gestures.cancel_transient(); }
+// Read-only coordinates for browser regression checks. Values are game units,
+// independent of the canvas size and of the GPU render-target pixel density.
+__attribute__((export_name("sdl_player_state"))) const float* sdl_player_state() {
+    static float out[4]{};
+    using namespace th20::source;
+    out[0]=0;
+    if(gameplay::controller){
+        auto* p=static_cast<player_entity::Player*>(game_session::context(0).objects_04[0]);
+        if(p){out[0]=1;out[1]=float(p->state);out[2]=p->position_614.x;out[3]=p->position_614.y;}
+    }
+    return out;
+}
 __attribute__((export_name("sdl_touch_options"))) void sdl_touch_options(std::uint32_t on, std::uint32_t free_mode, float speed) {
     auto& g = th20::source::input::gestures;
     g.enabled = on; g.unlimited = free_mode; g.sensitivity = std::clamp(speed, 1.f, 3.f);

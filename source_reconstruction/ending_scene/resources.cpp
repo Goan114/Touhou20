@@ -5,6 +5,7 @@
 #include "../archive/resource_manager.hpp"
 #include "../sprite_renderer/animation_file.hpp"
 #include "../sprite_renderer/loading_interrupt.hpp"
+#include "../sprite_renderer/render_mesh.hpp"
 #include "../text_renderer/text.hpp"
 #include "../progress_state/manager.hpp"
 #include "../gameplay/player_state.hpp"
@@ -42,7 +43,10 @@ int initialize(EndingInf& o){
 void load_pending_resource(Script& o){
     auto* file=sprite::load_animation_file(*program_entry::sprite_controller,o.pending_slot+15,o.pending_file,program_entry::log_buffer,program_entry::graphics_state.event_flags);
     if(o.pending_slot<0||o.pending_slot>=4)throw std::out_of_range("Ending ANM slot outside4 files");o.files[o.pending_slot]=file;std::atomic_ref(o.flags).fetch_and(~4u);
-    sprite::interrupt_animation_children(*program_entry::sprite_controller,text::renderer->loading_handle,1);text::renderer->loading_handle=0;
+    auto& handle=text::renderer->loading_handle;
+    sprite::interrupt_animation_children(*program_entry::sprite_controller,handle,1);
+    if(auto* animation=sprite::find_animation(*program_entry::sprite_controller,handle))sprite::hide_animation_tree(*animation);
+    sprite::request_animation_deletion(*program_entry::sprite_controller,handle);
 }
 void begin_resource_load(Script& o){
     text::renderer->create_loading_text(data::f_0056cda8,data::f_00570388);

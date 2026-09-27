@@ -1,5 +1,8 @@
 #include "enemy_variables.hpp"
 #include "enemy_state.hpp"
+#ifdef TH_SDL3
+#include "enemy_entity.hpp"
+#endif
 #include <cstring>
 #include <stdexcept>
 #include <immintrin.h>
@@ -8,7 +11,16 @@ std::uint32_t enemy_script_globals[4]={};
 namespace {
 template<class T>T read(const void* p,std::size_t offset) noexcept {T value;std::memcpy(&value,static_cast<const std::uint8_t*>(p)+offset,sizeof(value));return value;}
 std::uint32_t* address(void* p,std::size_t offset) noexcept {return reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(p)+offset);}
-void* controller_for(void* entity) {return read<void*>(read<void*>(entity,0x424),8);}
+void* controller_for(void* entity) {
+#ifdef TH_SDL3
+    // Enemy embeds std::function; libc++ lays it out differently from the
+    // original MSVC x86 object. Use the actual Context member in the web build.
+    auto* context=static_cast<Enemy*>(entity)->context;
+    return context?context->objects_04[1]:nullptr;
+#else
+    return read<void*>(read<void*>(entity,0x424),8);
+#endif
+}
 void* selected_or_self(void* entity) {
     if(!selected_enemy(controller_for(entity),0))return entity;
     return selected_enemy(controller_for(entity),0);          //original performs the lookup again

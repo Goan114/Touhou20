@@ -30,10 +30,11 @@ int acquire_single_instance() {
 
 int create_game_window(WindowStatePrefix& w,HINSTANCE instance) {
 #ifdef TH_SDL3
-    // The browser canvas replaces the Win32 window; no HWND exists. Display
-    // mode semantics stay windowed at the canvas size (640x480 backbuffer).
-    const auto& c=pe::graphics_state.configuration;
-    w.display_mode=c.saved_display_mode;
+    // Preserve the original 640x480 logical coordinate system. The graphics
+    // adapter allocates higher resolution GPU surfaces independently.
+    auto& c=pe::graphics_state.configuration;
+    c.saved_display_mode=3;
+    w.display_mode=3;
     pe::graphics_state.presentation.Windowed=true;
     if(c.frame_skip==0 && c.presentation_mode==2) w.flags|=4;
     else w.flags&=~4u;
@@ -112,7 +113,7 @@ LRESULT CALLBACK window_proc(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
             case 8:case 9:
                 switch(c.scale_choice) {
                 case 0:w.display_mode=3;break;case 1:w.display_mode=4;break;
-                case 2:case 5:w.display_mode=5;break;case 3:w.display_mode=6;break;
+                case 2:case 5:w.display_mode=3;break;case 3:w.display_mode=6;break;
                 case 4:w.display_mode=7;break;
                 }break;
             }

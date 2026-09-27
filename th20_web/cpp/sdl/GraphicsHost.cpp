@@ -20,10 +20,12 @@ namespace {
 struct Resource {
     Surface s{};
     std::vector<u8> bytes;
+    bool scalable=false;
 };
 struct Host {
     std::map<u32, Resource> resources;
     u32 next = 1;
+    u32 density = 1;
     std::deque<Texture> textures;       // deque: Texture* stays stable for the game
     std::unique_ptr<Renderer> gpu;
     u32 back = 0, depth = 0, target = 0; // target 0 means the backbuffer
@@ -36,10 +38,12 @@ struct Host {
         if (it == resources.end()) { std::fprintf(stderr, "SDL TH20 invalid surface %u\n", id); std::abort(); }
         return it->second;
     }
-    u32 image(u32 w, u32 h, PixelFormat f) {
+    u32 image(u32 w, u32 h, PixelFormat f, bool renderTarget=false) {
         const u32 id = next++;
         auto& r = resources[id];
         r.s.handle = id; r.s.width = w; r.s.height = h; r.s.format = f;
+        r.scalable=renderTarget;
+        r.s.pixelScale = renderTarget ? density : 1;
         r.s.pitch = w * pixel_bytes(f);
         r.s.size = r.s.pitch * h;
         r.bytes.assign(r.s.size, 0);
@@ -49,7 +53,7 @@ struct Host {
     void erase(u32 id) { gpu->release(id); resources.erase(id); }
     static Surface resolve(void* p, u32 id) {
         // Shared ImGui overlay pass asks for the canonical depth handle.
-        if (id == 0xffffffff) return {id, 640, 480, PixelFormat::Depth16, 0, nullptr, 0, 0};
+        if (id == 0xffffffff) return {id, static_cast<Host*>(p)->back_token.width, static_cast<Host*>(p)->back_token.height, PixelFormat::Depth16, 0, nullptr, 0, 0, static_cast<Host*>(p)->density};
         return static_cast<Host*>(p)->get(id).s;
     }
     u32 current_target() const { return target ? target : back; }
@@ -64,9 +68,10 @@ bool GraphicsDevice::create(u32 width, u32 height, PixelFormat back_format, u32 
         host.gpu = std::make_unique<Renderer>(20, Host::resolve, &host);
         if (!host.gpu->initialize()) return false;
     }
+    host.density=host.gpu->refresh_output_size();
     if (host.back) { host.erase(host.back); host.erase(host.depth); }
-    host.back = host.image(width, height, back_format);
-    host.depth = host.image(width, height, PixelFormat::Depth16);
+    host.back = host.image(width, height, back_format, true);
+    host.depth = host.image(width, height, PixelFormat::Depth16, true);
     host.back_token = {host.back, width, height, back_format, true};
     host.target = 0;
     host.gpu->state.target = host.back;
@@ -79,8 +84,8 @@ bool GraphicsDevice::reset_backbuffer(u32 width, u32 height, PixelFormat back_fo
     host.gpu->flush();
     host.erase(host.back);
     host.erase(host.depth);
-    host.back = host.image(width, height, back_format);
-    host.depth = host.image(width, height, PixelFormat::Depth16);
+    host.back = host.image(width, height, back_format, true);
+    host.depth = host.image(width, height, PixelFormat::Depth16, true);
     host.back_token = {host.back, width, height, back_format, true};
     host.target = 0;
     host.gpu->state.target = host.back;
@@ -96,7 +101,19 @@ void GraphicsDevice::clear(u32 flags, u32 color, float depth, u32 stencil, const
     host.gpu->clear(flags, color, depth, stencil, rects, count);
 }
 
-void GraphicsDevice::present() { host.gpu->present(host.back); }
+void GraphicsDevice::present() {
+    host.gpu->flush();
+    const u32 density=host.gpu->refresh_output_size();
+    if(density!=host.density){
+        const u32 previous=host.density;host.density=density;
+        for(auto& entry:host.resources)if(entry.second.scalable){
+            entry.second.s.pixelScale=density;
+            host.gpu->resize_surface(entry.first,previous);
+        }
+        host.gpu->resize_surface(0xffffffff,previous);
+    }
+    host.gpu->present(host.back);
+}
 
 void GraphicsDevice::vertex_format(VertexLayout layout) { host.gpu->state.layout = attributes(layout); }
 
@@ -135,7 +152,7 @@ void GraphicsDevice::draw_corner_strip(u32 first, u32 count) {
 }
 
 Texture* GraphicsDevice::create_texture(u32 width, u32 height, PixelFormat format, bool render_target) {
-    const u32 id = host.image(width, height, format);
+    const u32 id = host.image(width, height, format, render_target);
     for (auto& slot : host.textures)
         if (!slot.id) {
             slot = {id, width, height, format, render_target};
@@ -194,14 +211,14 @@ bool GraphicsDevice::copy_surface(Texture* destination, const std::int32_t* dest
     if (from.format != to.format) return false;
     std::int32_t box[]{0, 0, static_cast<std::int32_t>(from.width), static_cast<std::int32_t>(from.height)};
     if (!source_rect) source_rect = box;
-    std::int32_t point[]{source_rect[0], source_rect[1]};
-    if (!destination_rect) destination_rect = point;
-    const u32 width = source_rect[2] - source_rect[0], height = source_rect[3] - source_rect[1];
+    std::int32_t full_destination[]{source_rect[0], source_rect[1], source_rect[0] + source_rect[2] - source_rect[0], source_rect[1] + source_rect[3] - source_rect[1]};
+    if (!destination_rect) destination_rect = full_destination;
+    if (source_rect[2] <= source_rect[0] || source_rect[3] <= source_rect[1] ||
+        destination_rect[2] <= destination_rect[0] || destination_rect[3] <= destination_rect[1]) return false;
     if (source_rect[0] < 0 || source_rect[1] < 0 || source_rect[2] > (std::int32_t)from.width ||
         source_rect[3] > (std::int32_t)from.height || destination_rect[0] < 0 || destination_rect[1] < 0 ||
-        destination_rect[0] + (std::int32_t)width > (std::int32_t)to.width ||
-        destination_rect[1] + (std::int32_t)height > (std::int32_t)to.height) return false;
-    host.gpu->copy(source->id, source_rect, destination->id, destination_rect);
+        destination_rect[2] > (std::int32_t)to.width || destination_rect[3] > (std::int32_t)to.height) return false;
+    host.gpu->blit(source->id, source_rect, destination->id, destination_rect);
     to.version++; // GPU revision advanced by the blit; match the CPU revision
     return true;
 }

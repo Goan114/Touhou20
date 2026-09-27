@@ -10,6 +10,7 @@ uniform sampler2D sourceImage,weights;
 uniform ivec4 sourceRect,destinationRect;
 uniform ivec4 sourceMask,destinationMask;
 uniform bool triangle;
+uniform int sourceScale,destinationScale;
 out vec4 outputColor;
 // The original writer multiplies and adds under round-toward-zero. Retain
 // that rounding using the positive f32 significand, without GPU double support.
@@ -54,14 +55,14 @@ uint channel(float value,uint mask){
 }
 float originalUnit(int mask){return uintBitsToFloat(mask==255?0x3b808081u:mask==31?0x3d042108u:mask==63?0x3c820821u:mask==15?0x3d888889u:0x3f800000u);}
 vec4 originalPixel(ivec2 at){
- vec4 p=texelFetch(sourceImage,at,0);vec4 mask=vec4(sourceMask);
+ vec4 p=sourceScale>1?texture(sourceImage,(vec2(at)+0.5)/vec2(textureSize(sourceImage,0)/sourceScale)):texelFetch(sourceImage,at,0);vec4 mask=vec4(sourceMask);
  // Restore original integer channels before the original normalization.
  vec4 integers=floor(p*mask+0.5);
  vec4 unit=vec4(originalUnit(sourceMask.r),originalUnit(sourceMask.g),originalUnit(sourceMask.b),originalUnit(sourceMask.a));
  return mix(vec4(1),vec4(multiply(integers.r,unit.r),multiply(integers.g,unit.g),multiply(integers.b,unit.b),multiply(integers.a,unit.a)),greaterThan(mask,vec4(0)));
 }
 void main(){
- ivec2 at=ivec2(gl_FragCoord.xy)-destinationRect.xy;
+ ivec2 at=ivec2(gl_FragCoord.xy)/destinationScale-destinationRect.xy;
  vec4 value=vec4(0);
  if(triangle){
   int row=destinationRect.z+at.y;

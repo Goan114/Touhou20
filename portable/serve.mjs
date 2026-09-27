@@ -9,7 +9,9 @@ const site=resolve(value('--site',resolve(dirname(fileURLToPath(import.meta.url)
 // of the older site files.json; accept either as the serve whitelist.
 const filesListing=(()=>{try{return Object.keys(JSON.parse(readFileSync(resolve(site,'files.json')))).concat('files.json');}catch{return Object.keys(JSON.parse(readFileSync(resolve(site,'runtime-files.json'))).files).concat('runtime-files.json');}})();
 const allowed=new Set(filesListing),th20=manifest.game==='th20';
-if(th20)for(const name of ['game-data/th20.dat','game-data/thbgm.dat','game-data/msgothic.ttc'])allowed.add(name);
+if(th20)for(const name of ['game-data/th20.dat','game-data/thbgm.dat','game-data/msgothic.ttc','game-data/unifont.otf'])allowed.add(name);
+if(th20)for(let n=1;n<=18;n++)allowed.add(`bgm-ogg/th20_${String(n).padStart(2,'0')}.ogg`);
+if(th20)allowed.add('bgm-ogg/th128_08.ogg');
 const port=Number(value('--port',manifest.game==='th08'?'8092':th20?'8094':'8090'));
 if(!Number.isInteger(port)||port<1||port>65535)throw Error('Invalid port');
 function open(){if(args.includes('--open')){const url=th20?`http://127.0.0.1:${port}/th20.html?managedData=1&runtimeEpoch=1&gameGeneration=local`:`http://127.0.0.1:${port}`;if(process.platform==='win32')spawn('explorer.exe',[url],{windowsHide:true,stdio:'ignore'}).on('error',()=>console.log(url));}}
@@ -19,7 +21,7 @@ function open(){if(args.includes('--open')){const url=th20?`http://127.0.0.1:${p
 const localProvider='<script>window.__eaglerPrepareManagedRuntimeDataV1=async()=>{const r=await fetch("./game-data/th20.dat");if(!r.ok)throw Error("Missing local game data: place game-data/th20.dat next to the runtime (and game-data/thbgm.dat for music)");return {buffer:await r.arrayBuffer(),bytes:0};};'
  +'window.__th20Auto=setInterval(()=>{if(!window.__th20Runtime)return;clearInterval(window.__th20Auto);'
  +'const send=(command,extra)=>window.postMessage({protocol:"eagler-touhou/1",game:"th20",epoch:1,command,...extra},location.origin);'
- +'send("configure",{music:"dat",options:{}});send("launch");},100);</script>';
+ +'send("configure",{music:"ogg",options:{}});send("launch");},100);</script>';
 const server=http.createServer((req,res)=>{
  console.log(new Date().toISOString().slice(11,19),req.url.slice(0,90));
  if(!['GET','HEAD'].includes(req.method)){res.writeHead(405,{Allow:'GET, HEAD'}).end();return;}
@@ -30,8 +32,10 @@ const server=http.createServer((req,res)=>{
  // operator dropped into game-data/: the BGM archive and the shared font.
  if(th20&&name==='resources.json'){
   const base=JSON.parse(readFileSync(resolve(site,'resources.json'),'utf8')),extra=[];
-  for(const [file,path] of [['thbgm.dat','/game/thbgm.dat'],['msgothic.ttc','/msgothic.ttc']])
+  for(const [file,path] of [['thbgm.dat','/game/thbgm.dat'],['msgothic.ttc','/msgothic.ttc'],['unifont.otf','/unifont.otf']])
    if(existsSync(resolve(site,'game-data',file))){const bytes=statSync(resolve(site,'game-data',file)).size;extra.push({path,url:'./game-data/'+file,bytes});}
+  for(const file of [...Array.from({length:18},(_,i)=>`th20_${String(i+1).padStart(2,'0')}.ogg`),'th128_08.ogg'])
+   if(existsSync(resolve(site,'bgm-ogg',file))){const bytes=statSync(resolve(site,'bgm-ogg',file)).size;extra.push({path:'/bgm-ogg/'+file,url:'./bgm-ogg/'+file,bytes});}
   res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-cache','X-Content-Type-Options':'nosniff'}).end(JSON.stringify({...base,resources:[...(base.resources||[]),...extra]},null,2));return;
  }
  if(!allowed.has(name)){res.writeHead(name==='favicon.ico'?204:404).end();return;}
