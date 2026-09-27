@@ -55,6 +55,15 @@ int load_worker(){
             // The original waits for 180 drawn logo frames; the inline worker
             // occupies the render thread, so the brand delay cannot be
             // observed and is skipped (loading is already complete).
+            // Cancel the pending logo draw before releasing its ANM. With an
+            // inline worker, draw() has not consumed signature_ready yet; the
+            // next frame would spawn from freed memory, corrupting whichever
+            // allocation reused it (notably the title mesh's strip handles).
+            auto& loading=*startup::loading_scene;
+            scheduler::disable(*loading.draw_node);
+            std::atomic_ref(loading.signature_ready).store(0,std::memory_order_release);
+            std::atomic_ref(loading.text_ready).store(0,std::memory_order_release);
+            loading.signature_file=nullptr;
 #else
             while(startup::loading_scene->draw_frames<180&&!(pe::graphics_state.event_flags&0x60))Sleep(16);
 #endif

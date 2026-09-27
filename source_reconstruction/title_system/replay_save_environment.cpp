@@ -6,7 +6,13 @@ namespace th20::source::title {
 namespace {
 struct Production final:ReplaySaveEnvironment {
     Production():ReplaySaveEnvironment(selection_environment()){}
-    void select_stage_eight()override{gameplay::select_stage(selection.main.session.player_table,8);}
+    void select_stage_eight()override{
+        // 526b1a passes 8 through 4be360 as the post-clear result marker.
+        // There is no eighth playable stage resource. Only update the session
+        // marker here: selecting stages[8] either throws or creates an invalid
+        // resource pointer, before the replay slots can even be displayed.
+        gameplay::player_state::write(selection.main.session.player_table,0x1f4,8);
+    }
     runtime::CallbackOwner* read_metadata(const char* filename)override{return replay::read_metadata(filename);}
     void retire(runtime::CallbackOwner* value)override{runtime::retire_callback_owner(value);}
     void retire_replay()override{runtime::retire_callback_owner(replay::controller());}
