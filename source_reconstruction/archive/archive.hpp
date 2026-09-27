@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -54,11 +55,15 @@ public:
     Bytes read(std::string_view name) { return read(find(name)); }
 private:
     Bytes file_;
+    std::ifstream source_;
+    std::size_t file_size_ = 0;
     std::vector<ArchiveEntry> entries_;
     LzssDecoder decoder_;
     LzssDecoder* process_dictionary_ = nullptr;
     LzssDecoder& decoder() noexcept { return process_dictionary_ ? *process_dictionary_ : decoder_; }
     std::uint32_t catalog_offset_ = 0;
+    void open_file(const std::filesystem::path&);
+    Bytes read_range(std::size_t offset, std::size_t size);
     void parse();
 };
 } // namespace th20::source

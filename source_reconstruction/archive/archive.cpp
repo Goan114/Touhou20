@@ -18,16 +18,6 @@ Bytes slice(const Bytes& bytes, std::size_t at, std::size_t size) {
     require(at <= bytes.size() && size <= bytes.size() - at, "Archive slice is out of bounds");
     return Bytes(bytes.begin() + at, bytes.begin() + at + size);
 }
-Bytes read_file(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
-    require(bool(input), "Cannot open archive");
-    const auto size = input.tellg();
-    require(size >= 16 && std::uint64_t(size) <= 0x7fffffff, "Unsupported archive size");
-    Bytes file(static_cast<std::size_t>(size));
-    input.seekg(0);
-    require(bool(input.read(reinterpret_cast<char*>(file.data()), size)), "Cannot read complete archive");
-    return file;
-}
 std::uint8_t lower_ascii(std::uint8_t c) noexcept {
     return c >= 'A' && c <= 'Z' ? static_cast<std::uint8_t>(c + 32) : c;
 }
@@ -133,23 +123,39 @@ Bytes LzssDecoder::decode(const Bytes& compressed, std::uint32_t expected_size) 
     return output;
 }
 
-Archive::Archive(const std::filesystem::path& filename) : Archive(read_file(filename)) {}
-Archive::Archive(Bytes file) : file_(std::move(file)) { parse(); }
-Archive::Archive(const std::filesystem::path& filename, LzssDecoder& dictionary) : Archive(read_file(filename), dictionary) {}
-Archive::Archive(Bytes file, LzssDecoder& dictionary) : file_(std::move(file)), process_dictionary_(&dictionary) { parse(); }
+Archive::Archive(const std::filesystem::path& filename) { open_file(filename); parse(); }
+Archive::Archive(Bytes file) : file_(std::move(file)), file_size_(file_.size()) { parse(); }
+Archive::Archive(const std::filesystem::path& filename, LzssDecoder& dictionary) : process_dictionary_(&dictionary) { open_file(filename); parse(); }
+Archive::Archive(Bytes file, LzssDecoder& dictionary) : file_(std::move(file)), file_size_(file_.size()), process_dictionary_(&dictionary) { parse(); }
+void Archive::open_file(const std::filesystem::path& filename) {
+    source_.open(filename, std::ios::binary | std::ios::ate);
+    require(bool(source_), "Cannot open archive");
+    const auto size = source_.tellg();
+    require(size >= 16 && std::uint64_t(size) <= 0x7fffffff, "Unsupported archive size");
+    file_size_ = static_cast<std::size_t>(size);
+}
+Bytes Archive::read_range(std::size_t offset, std::size_t size) {
+    require(offset <= file_size_ && size <= file_size_ - offset, "Archive slice is out of bounds");
+    if (!source_.is_open()) return slice(file_, offset, size);
+    Bytes result(size);
+    source_.clear();
+    source_.seekg(static_cast<std::streamoff>(offset));
+    require(bool(source_.read(reinterpret_cast<char*>(result.data()), static_cast<std::streamsize>(size))), "Cannot read archive member");
+    return result;
+}
 void Archive::parse() {
-    require(file_.size() >= 16 && file_.size() <= 0x7fffffff, "Invalid archive size");
-    auto header = slice(file_, 0, 16);
+    require(file_size_ >= 16 && file_size_ <= 0x7fffffff, "Invalid archive size");
+    auto header = read_range(0, 16);
     decrypt(header, {0x1b, 0x37, 16, 16});
     require(u32(header, 0) == 0x31414854, "Archive does not have THA1 magic");
     const auto catalog_size = u32(header, 4) - std::uint32_t(123456789);
     const auto stored_catalog_size = u32(header, 8) - std::uint32_t(987654321);
     const auto count = u32(header, 12) - std::uint32_t(135792468);
-    require(stored_catalog_size <= file_.size() - 16, "Catalog extends before archive header");
+    require(stored_catalog_size <= file_size_ - 16, "Catalog extends before archive header");
     require(count <= 1000000 && catalog_size <= 0x40000000 &&
             std::uint64_t(count) * 16 <= catalog_size, "Invalid catalog count or size");
-    catalog_offset_ = static_cast<std::uint32_t>(file_.size() - stored_catalog_size);
-    auto compressed = slice(file_, catalog_offset_, stored_catalog_size);
+    catalog_offset_ = static_cast<std::uint32_t>(file_size_ - stored_catalog_size);
+    auto compressed = read_range(catalog_offset_, stored_catalog_size);
     decrypt(compressed, {0x3e, 0x9b, 0x80, stored_catalog_size});
     const auto catalog = decoder().decode(compressed, catalog_size);
     std::size_t cursor = 0;
@@ -182,7 +188,7 @@ std::size_t Archive::find(std::string_view name) const {
 }
 Bytes Archive::read(std::size_t index) {
     const auto& entry = entries_.at(index);
-    auto data = slice(file_, entry.offset, entry.stored_size);
+    auto data = read_range(entry.offset, entry.stored_size);
     decrypt(data, file_crypt_parameters(entry.name));
     if (entry.stored_size == entry.size) return data;
     return decoder().decode(data, entry.size);
