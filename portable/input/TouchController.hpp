@@ -45,6 +45,10 @@ public:
             if(fingers.size()>=4){escape_ticks=3;cancel();return;}const float dx=px-tap_x,dy=py-tap_y;
             if(double_tap&&tap_armed&&now-tap_time<=320&&dx*dx+dy*dy<=38.4f*38.4f){bomb_ticks=3;tap_armed=false;tap={};return;}
             tap_armed=false;if(double_tap){tap={true,id,1,px,py,px,py,now};tap_moved=false;}
+            // A new DOWN retires an owner whose finger is already gone: a lost UP
+            // or CANCEL must not strand movement on a dead gesture. A live second
+            // finger is not the owner and never steals the drag from it.
+            if(dragging&&!fingers.count(primary))clear_motion();
             if(!s.ready||mode>=2||dragging)return;dragging=true;primary=id;previous_x=x;previous_y=y;target_x=s.x;target_y=s.y;instance=s.instance;return;
         }
         if(menu.active&&menu.id==id){menu.last_x=px;menu.last_y=py;return;}

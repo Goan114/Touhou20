@@ -7,6 +7,11 @@
 #include "../audio_runtime/audio.hpp"
 #include "../sprite_renderer/binding.hpp"
 #include "../sprite_renderer/named_spawn.hpp"
+#ifdef TH_SDL3
+// Direct-touch is a web-port capability; the native reconstruction keeps the
+// recovered eight-way path and links no touch owner.
+#include "../../../th20_web/cpp/sdl/TouchMotion.hpp"
+#endif
 namespace th20::source::player_entity {
 namespace {
 struct GameMovement final:MovementServices {
@@ -20,6 +25,13 @@ struct GameMovement final:MovementServices {
     sprite::Animation* animation(std::uint32_t& handle) override{return sprite::resolve_animation_handle(*program_entry::sprite_controller,handle);}
     std::uint32_t spawn_focus_effect(Player& player) override{auto& file=*static_cast<effects::Controller*>(player.context->objects_04[7])->files[0];std::uint32_t handle;sprite::spawn_named_animation(*program_entry::sprite_controller,file,handle,"effect",19,nullptr,0,-1,0);return handle;}
     void sound(int id) override{program_entry::thread_registry.request_effect(id,0);}
+    bool analog(int slot,float& x,float& y) override{
+#ifdef TH_SDL3
+        (void)slot;return input::analog_motion(x,y);
+#else
+        (void)slot;(void)x;(void)y;return false;
+#endif
+    }
 };
 }
 MovementServices& movement_services(){static GameMovement result;return result;}

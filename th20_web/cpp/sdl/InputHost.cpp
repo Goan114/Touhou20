@@ -5,12 +5,16 @@
 // state; APIs that have no browser meaning report honest absence (XInput and
 // WinMM joysticks stay unconnected).
 #include "../../../source_reconstruction/input/input.hpp"
+#include "../../../source_reconstruction/program_entry/program_entry.hpp"
 #include "../../../source_reconstruction/game_session/session.hpp"
 #include "../../../source_reconstruction/player_entity/owner.hpp"
 #include "../../../source_reconstruction/hud_system/hud.hpp"
+#include "../../../source_reconstruction/pause_system/pause.hpp"
 namespace th20::source::gameplay { class GameController; extern GameController* controller; }
 #include "../platform/Time.hpp"
 #include "../../../portable/input/TouchController.hpp"
+#include "../../../portable/input/MotionTrack.hpp"
+#include "TouchMotion.hpp"
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <cmath>
@@ -24,6 +28,20 @@ struct Key {const char* code;const char* sdl;std::uint32_t scan,vk;bool hosted=f
 touhou::input::TouchController gestures;
 std::uint8_t synthetic_keys[256]{};
 bool touch_keys[256]{};
+// Continuous direct-touch direction for the current logical frame (movement
+// units), plus the pulses the shared controller produced this frame so the
+// browser regression check can observe the menu path.
+float analog_x=0.f,analog_y=0.f;
+bool analog_active=false,confirm_pulse=false,escape_pulse=false;
+// Last motion code the shared controller produced this frame (1 = drag towards
+// the finger, 2 = unlimited drag) and sticky one-shot pulse counters. The
+// counters exist because a pulse lasts only a few logical frames, so a browser
+// check that samples the live flags can miss it; reading the probe drains them.
+int last_motion=0;
+unsigned confirm_pulses=0,escape_pulses=0;
+// Monotonic count of logical input samples. A browser check needs it to tell a
+// gesture that was ignored apart from a frame loop that is not ticking at all.
+unsigned sample_ticks=0;
 
 SDL_Gamepad* pads[4]{};
 constexpr SDL_GamepadButton pad_slots[]={SDL_GAMEPAD_BUTTON_SOUTH,SDL_GAMEPAD_BUTTON_EAST,SDL_GAMEPAD_BUTTON_WEST,
@@ -48,7 +66,14 @@ void press(std::uint8_t* out, std::uint32_t vk) { out[vk] |= 0x80; }
 // Scene adapter for gesture context: gameplay when a GameController exists.
 touhou::input::TouchState touch_state() {
     touhou::input::TouchState s;
-    s.context = gameplay::controller ? (hud::controller && hud::controller->collecting ? 2 : 1) : 0;
+    const bool in_game = gameplay::controller != nullptr;
+    const bool dialogue = in_game && hud::controller && hud::controller->collecting;
+    // The pause menu keeps its owner for the whole stage, so its state (0 means
+    // "not showing") decides whether a gesture belongs to gameplay or to the
+    // menu. Menu context is what lets a tap confirm and a two-finger tap cancel
+    // instead of driving the player and firing.
+    const bool menu = in_game && pause::controller() && pause::controller()->state != 0;
+    s.context = dialogue ? 2 : (in_game && !menu ? 1 : 0);
     if (s.context == 1) {
         auto* player = static_cast<player_entity::Player*>(game_session::context(0).objects_04[0]);
         if (player && player->state == 1) {
@@ -157,21 +182,51 @@ int read_scan_keyboard(std::uint8_t* output) {
 // Called once per game tick by the frame loop (the sdl_native_input role).
 void sample_native_input() {
     pump_events();
+    ++sample_ticks;
     const auto state = touch_state();
     const auto sample = gestures.sample(state, SDL_GetTicks(), (synthetic_keys[16] & 0x80) != 0,
         (synthetic_keys[37] | synthetic_keys[38] | synthetic_keys[39] | synthetic_keys[40]) & 0x80);
     std::memcpy(touch_keys, sample.keys, sizeof(touch_keys));
-    // TH20 consumes digital directions. Resolve the shared controller's drag
-    // target against the live player at the same input sample as keyboard.
+    confirm_pulse = sample.keys[90];
+    escape_pulse = sample.keys[27];
+    last_motion = sample.motion;
+    if (confirm_pulse) ++confirm_pulses;
+    if (escape_pulse) ++escape_pulses;
+    analog_active = false; analog_x = analog_y = 0.f;
     if (sample.motion && state.ready) {
-        const float speed = std::max(1.f, sample.keys[16] ? state.slow : state.fast);
-        const float deadzone = speed * .45f;
-        const float dx = sample.x - state.x, dy = sample.y - state.y;
-        if (dx < -deadzone) touch_keys[37] = true;
-        if (dx > deadzone) touch_keys[39] = true;
-        if (dy < -deadzone) touch_keys[38] = true;
-        if (dy > deadzone) touch_keys[40] = true;
+        // Free-direction movement: the shared controller owns the reachable
+        // target (already clamped to the playfield), so this frame's vector is
+        // simply the reach towards the finger, limited to the player's own
+        // speed. TH20's game input stays eight-way; this is the port's
+        // direct-touch path and it is only active while a gesture exists.
+        const float speed = std::max(1.f, sample.keys[16] ? state.slow : state.fast) * 128.f;
+        float dx = (sample.x - state.x) * 128.f, dy = (sample.y - state.y) * 128.f;
+        touhou::input::limit_vector(dx, dy, speed);
+        analog_x = dx; analog_y = dy; analog_active = (dx != 0.f || dy != 0.f);
     }
+    if (!state.ready) {
+        // Menu/dialogue/dialogue-skip contexts: the shared controller emits Z
+        // for a tap and Escape for a two-finger tap. TH20's menus read the
+        // configured shoot/bomb/menu actions (default Z / X / Escape), so mirror
+        // the pulse onto those bindings as well; Enter is a fixed confirm VK.
+        const auto* bindings = controller ? &controller->mappings[0] : nullptr;
+        const auto press_vk = [](std::uint32_t vk) { if (vk && vk < 256) touch_keys[vk] = true; };
+        if (confirm_pulse) {
+            touch_keys[0x0d] = true;
+            if (bindings) press_vk(bindings->keyboard[0]);
+        }
+        if (escape_pulse && bindings) {
+            press_vk(bindings->keyboard[3]);
+            press_vk(bindings->keyboard[1]);
+        }
+    }
+}
+
+// Port-owned direct-touch source for the recovered movement (TouchMotion.hpp).
+bool analog_motion(float& x, float& y) {
+    if (!analog_active) return false;
+    x = analog_x; y = analog_y;
+    return true;
 }
 
 void initialize_input_host() {
@@ -235,5 +290,36 @@ __attribute__((export_name("sdl_touch_mode"))) void sdl_touch_mode(std::uint32_t
 __attribute__((export_name("sdl_touch_controls"))) void sdl_touch_controls(std::uint32_t shoot, std::uint32_t slow,
     std::uint32_t bomb, std::uint32_t escape, float x, float y) {
     th20::source::input::gestures.controls(shoot, slow, bomb, escape, x, y);
+}
+// Read-only touch diagnostics for the browser regression check. Reading drains
+// the one-shot counters, so fields 14/15 count pulses that appeared since the
+// previous read:
+// [context, dragging, analog_active, analog_x, analog_y, confirm_pulse, escape_pulse, pause_state,
+//  enabled, ready, motion, buttons_current, buttons_pressed, window_active,
+//  confirm_pulses, escape_pulses, sample_ticks].
+__attribute__((export_name("sdl_touch_probe"))) const float* sdl_touch_probe() {
+    static float out[17]{};
+    using namespace th20::source;
+    const auto& g = input::gestures;
+    out[0] = float(g.current_context());
+    out[1] = g.active() ? 1.f : 0.f;
+    out[2] = input::analog_active ? 1.f : 0.f;
+    out[3] = input::analog_x;
+    out[4] = input::analog_y;
+    out[5] = input::confirm_pulse ? 1.f : 0.f;
+    out[6] = input::escape_pulse ? 1.f : 0.f;
+    out[7] = pause::controller() ? float(pause::controller()->state) : -1.f;
+    out[8] = g.enabled ? 1.f : 0.f;
+    out[9] = input::touch_state().ready ? 1.f : 0.f;
+    out[10] = float(input::last_motion);
+    const auto* buttons = input::button_slot(0);
+    out[11] = buttons ? float(buttons->current) : -1.f;
+    out[12] = buttons ? float(buttons->pressed) : -1.f;
+    out[13] = float(program_entry::window_state.active);
+    out[14] = float(input::confirm_pulses);
+    out[15] = float(input::escape_pulses);
+    out[16] = float(input::sample_ticks);
+    input::confirm_pulses = input::escape_pulses = 0;
+    return out;
 }
 }

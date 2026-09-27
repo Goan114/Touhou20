@@ -15,6 +15,11 @@ public:
     virtual sprite::Animation* animation(std::uint32_t&)=0;
     virtual std::uint32_t spawn_focus_effect(Player&)=0;
     virtual void sound(int)=0;
+    // Port extension for the direct-touch adapter: a continuous direction for
+    // this logical frame, already expressed in movement units (1/128 game unit
+    // per frame) and clamped by the adapter. The default keeps the recovered
+    // eight-way path for every other input owner, including the CPU comparisons.
+    virtual bool analog(int,float& x,float& y){x=y=0.f;return false;}
 };
 MovementServices& movement_services();
 std::uint32_t set_transition_direction(Player&,std::uint32_t); //4fff10
