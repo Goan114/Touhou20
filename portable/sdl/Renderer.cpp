@@ -127,10 +127,18 @@ void Renderer::draw_batch(u32 count,const void* data,u32 stride){
  // The game already coalesced these triangles. Consume while its arena is
  // valid, without retaining a pointer to a buffer the next sprite can reuse.
  if(version==20){
-  // Stage backgrounds and dense bullet scenes split the game's sprite arena
-  // into many small submissions. Copy adjacent matching batches into the
-  // renderer's bounded staging buffer so WebGL receives fewer draw calls.
-  draw(Topology::Triangles,count,data,stride);return;
+  // TH20's only draw_batch caller is the sprite renderer's frame-owned vertex
+  // arena. Adjacent flushes therefore stay alive and, in the common case, are
+  // physically contiguous. Delay those runs without copying them into a second
+  // staging vector: this preserves the state-based draw-call coalescing while
+  // removing one full vertex memcpy from dense bullet scenes.
+  ++stats.calls;state.stride=stride;const auto* src=static_cast<const u8*>(data);
+  const u32 bytes=count*3u*stride;
+  if(batching&&(instancing||!directBatching||!equal(batchState,state)||directBatch+directBatchBytes!=src))flush();
+  if(!batching){batchState=state;batching=true;instancing=false;directBatching=true;directBatch=src;directBatchBytes=bytes;batchCount=count;}
+  else {directBatchBytes+=bytes;batchCount+=count;}
+  if(directBatchBytes>=1048576u)flush();
+  return;
  }
  flush();++stats.calls;state.stride=stride;stats.directBytes+=count*3*stride;
  issue(state,Topology::Triangles,count,data,count*3*stride,nullptr,IndexType::UInt16,nullptr,0);
@@ -201,6 +209,7 @@ Renderer::GPU& Renderer::target(u32 id,u32 depthId){auto& g=surface(id);GLuint b
 void Renderer::prepare(u32 h){surface(h);}
 void Renderer::draw(Topology primitive,u32 count,const void* data,u32 stride,const void* index,IndexType indexFormat){
  stats.calls++;state.stride=stride;
+ if(directBatching)flush();
  if(index||primitive<Topology::Triangles||primitive>Topology::Fan){flush();issue(state,primitive,count,data,vertex_count(primitive,count)*stride,index,indexFormat,nullptr,0);return;}
  const bool instance=(version==10||version==20)&&state.layout==attributes(VertexLayout::WorldUv)&&stride==20&&primitive==Topology::Strip&&count==2;
  if(instance){if(batching&&(!instancing||!equal(batchState,state,true)||quad.size()!=80||std::memcmp(quad.data(),data,80)))flush();if(!batching){batchState=state;quad.assign(static_cast<const u8*>(data),static_cast<const u8*>(data)+80);batching=instancing=true;}const auto old=worlds.size();worlds.resize(old+68);std::memcpy(worlds.data()+old,state.matrix[0].data(),64);std::memcpy(worlds.data()+old+64,&state.pipeline.textureFactor,4);if(worlds.size()>=1024*68)flush();return;}
@@ -208,8 +217,8 @@ void Renderer::draw(Topology primitive,u32 count,const void* data,u32 stride,con
  const auto* src=static_cast<const u8*>(data);const size_t start=batchBytes.size(),size=count*3*stride;stats.copiedBytes+=size;batchBytes.resize(start+size);auto* dest=batchBytes.data()+start;
  if(primitive==Topology::Triangles)std::memcpy(dest,src,size);else if(count){std::memcpy(dest,src,3*stride);dest+=3*stride;for(u32 i=1;i<count;i++){u32 a=primitive==Topology::Fan?0:i&1?i+1:i,b=primitive==Topology::Fan?i+1:i&1?i:i+1,c=i+2;for(u32 v:{a,b,c}){std::memcpy(dest,src+v*stride,stride);dest+=stride;}}}batchCount+=count;if(batchBytes.size()>=1048576)flush();
 }
-void Renderer::flush(){if(!batching)return;batching=false;if(instancing)issue(batchState,Topology::Strip,2,quad.data(),quad.size(),nullptr,IndexType::UInt16,worlds.size()>68?worlds.data():nullptr,worlds.size()>68?worlds.size():0);else issue(batchState,Topology::Triangles,batchCount,batchBytes.data(),batchBytes.size(),nullptr,IndexType::UInt16,nullptr,0);batchBytes.clear();worlds.clear();batchCount=0;instancing=false;}
-void Renderer::discard(){batching=instancing=false;batchBytes.clear();worlds.clear();batchCount=0;}
+void Renderer::flush(){if(!batching)return;batching=false;if(instancing)issue(batchState,Topology::Strip,2,quad.data(),quad.size(),nullptr,IndexType::UInt16,worlds.size()>68?worlds.data():nullptr,worlds.size()>68?worlds.size():0);else if(directBatching){stats.directBytes+=directBatchBytes;issue(batchState,Topology::Triangles,batchCount,directBatch,directBatchBytes,nullptr,IndexType::UInt16,nullptr,0);}else issue(batchState,Topology::Triangles,batchCount,batchBytes.data(),batchBytes.size(),nullptr,IndexType::UInt16,nullptr,0);batchBytes.clear();worlds.clear();batchCount=0;instancing=false;directBatching=false;directBatch=nullptr;directBatchBytes=0;}
+void Renderer::discard(){batching=instancing=directBatching=false;batchBytes.clear();worlds.clear();batchCount=directBatchBytes=0;directBatch=nullptr;}
 void Renderer::issue(const State& d,Topology primitive,u32 count,const void* data,u32 size,const void* index,IndexType indexFormat,const void* instance,u32 instanceSize){
  stats.batches++;const auto& p=d.pipeline;auto& cached=drawState.pipeline;const bool all=!drawState.valid;
  if(all||cached.dither!=p.dither)p.dither?glEnable(GL_DITHER):glDisable(GL_DITHER);

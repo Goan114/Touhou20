@@ -61,7 +61,8 @@ private:
     GLint imguiProjMtx=-1,imguiTexture=-1;
     Program generic{};bool warming=true,buildingGeneric=false;Program* program=nullptr;
     Stream vertices{},indices{},instances{};State batchState{};
-    std::vector<u8> batchBytes,quad,worlds,pixels;bool batching=false,instancing=false;
+    std::vector<u8> batchBytes,quad,worlds,pixels;bool batching=false,instancing=false,directBatching=false;
+    const u8* directBatch=nullptr;u32 directBatchBytes=0;
     u32 batchCount=0,pending=0;std::string failure;
     GPU& surface(u32);GPU& target(u32,u32);void issue(const State&,Topology,u32,const void*,u32,const void*,IndexType,const void*,u32);
     void bind_texture(GLuint);void bind_framebuffer(GLenum,GLuint);
