@@ -44,7 +44,7 @@ int run_dialogue(Dialogue& d){
         switch(op){
         case 0:return -1;
         case 1:{const auto index=argument();auto& handle=slot(d.portraits,index);
-            if(index==0){auto& player=*static_cast<player_entity::Player*>(game_session::context(0).objects_04[0]);const auto character=game_session::context(0).current_player->fields_00[2];if(character>=2)throw std::out_of_range("Dialogue original two-character script table");handle=spawn(*player.animation_file,character?77:66);immediate(handle,index+10+(signed_word(game_session::context(0).current_player->fields_00[3])/2)*10);}
+            if(index==0){auto& player=*static_cast<player_entity::Player*>(game_session::context(0).objects_04[0]);const auto character=game_session::context(0).current_player->fields_00[2];if(character>=2)throw std::out_of_range("Dialogue original two-character script table");handle=spawn(*player.animation_file,character?77:66);immediate(handle,index+17+(signed_word(game_session::context(0).current_player->fields_00[3])/2)*10);}
             else handle=stage_portrait(0x8c,index);break;}
         case 2:{const auto index=argument();slot(d.portrait_overlays,index)=stage_portrait(0x8c,index);d.fields_138[0]=0;break;}
         case 4:{auto& handle=slot(d.portraits,argument());signal(handle,1);handle=0;break;}
@@ -61,8 +61,8 @@ int run_dialogue(Dialogue& d){
             }else{if(d.timers[2].current<1)d.fields_108[2]=40;program_entry::thread_registry.request_effect(0,0);recovered::timer_set(d.timers[2],0);d.fields_108[0]=d.fields_108[1]=0;}
             break;}
         case 12:d.field_100=1;break;
-        case 13:immediate(slot(d.portraits,argument(8)),argument()+10+(signed_word(game_session::context(0).current_player->fields_00[3])/2)*10);break;
-        case 14:immediate(slot(d.portrait_overlays,argument(8)),argument()+10);break;
+        case 13:immediate(slot(d.portraits,argument(8)),argument()+17+(signed_word(game_session::context(0).current_player->fields_00[3])/2)*10);break;
+        case 14:immediate(slot(d.portrait_overlays,argument(8)),argument()+17);break;
         case 15:queue_dialogue_text(d,false);break;
         case 16:queue_dialogue_text(d,true);break;
         case 17:queue_dialogue_line(d);break;
