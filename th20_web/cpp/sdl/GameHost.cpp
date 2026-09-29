@@ -9,6 +9,7 @@
 #include "../../../source_reconstruction/program_entry/text_constants.hpp"
 #include "../../../source_reconstruction/platform_services/services.hpp"
 #include "../../../source_reconstruction/platform_window/platform_window.hpp"
+#include "../../../source_reconstruction/title_system/title.hpp"
 #include "../platform/Files.hpp"
 #include "../platform/Time.hpp"
 #include "../platform/Audio.hpp"
@@ -163,8 +164,15 @@ __attribute__((export_name("sdl_game_status"))) const std::int32_t* sdl_game_sta
     out[0] = pe::graphics_state.field_0b0c;              // scene
     out[1] = 0;                                          // stage (session-owned; read-only consumers tolerate 0)
     out[2] = 0;                                          // error channel (see application_error)
-    out[3] = out[4] = 0;
-    out[5] = out[6] = out[7] = out[8] = 0;               // touch context (InputHost owns gestures)
+    // Slots 3..8 were previously constant zero. They now report the title
+    // menu's read-only navigation position so a browser regression check can
+    // drive the menu deterministically instead of guessing from the picture.
+    const auto* title = th20::source::title::controller();
+    out[3] = title ? title->state : -1;                   // title page/state
+    out[4] = title ? title->phase : -1;                   // title phase within the page
+    out[5] = out[6] = 0;                                  // touch context (InputHost owns gestures)
+    out[7] = title ? title->cursor.current : -1;          // title list cursor
+    out[8] = title ? title->cursor108.current : -1;       // title page cursor
     out[9] = std::int32_t(th20::source::input::shared_state().slots[0].current);
     return out;
 }
