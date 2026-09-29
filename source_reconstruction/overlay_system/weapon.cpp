@@ -1,6 +1,7 @@
 #include "overlay.hpp"
 #include "../gameplay/player_state.hpp"
 #include "../player_entity/power.hpp"
+#include "../player_entity/shots.hpp"
 #include <algorithm>
 namespace th20::source::overlay {
 namespace ps=gameplay::player_state;namespace n=recovered;
@@ -26,7 +27,24 @@ void Weapon::update_passive(){passive=0;}
 int Weapon::script_variant(){return 0;} //412540 actual EAX=0
 void Weapon::start_phase(){} //40e5e0
 int Weapon::update_phase(){return 0;} //412540
-int Weapon::end_phase(){active=0;return 0;} //532f20
+int Weapon::end_phase(){
+ active=0;
+#ifdef TH_SDL3
+ // Red rage shots can remain in flight with their rage damage long after
+ // the meter expires. Remove only the main red rage pattern at the boundary.
+ if(role==0&&stone_id>=0&&stone_id<2){
+  if(auto* p=player()){
+   auto& shots=p->shots;
+   for(scheduler::Iterator it(shots.active.sentinel.next);it.current;it.advance()){
+    auto& shot=*reinterpret_cast<player_entity::Shot*>(it.current->value);
+    const auto pattern=shot.fields_b8[8]>>8;
+    if(pattern>=unsigned(stone_id*20+15)&&pattern<=unsigned(stone_id*20+19))player_entity::retire_shot(shot);
+   }
+  }
+ }
+#endif
+ return 0;
+} //532f20
 int Weapon::cancel_phase(){return 0;} //412540
 const sprite::Vec3* Weapon::phase_position(){return nullptr;} //412540
 int Weapon::shot_script_index(){if(role<0||role>2)return 0;return n::signed_bits(static_cast<unsigned>(stone_id)*20u+static_cast<unsigned>(role==0?0:role==1?5:10)+static_cast<unsigned>(player_entity::power_level(stats())));}

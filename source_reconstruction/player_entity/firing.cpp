@@ -31,7 +31,8 @@ void advance_shot_handle(ShotController& owner) noexcept{
 Shot* allocate_shot(ShotController& owner,FiringServices& host){
     auto* link=owner.free.sentinel.next;Shot* shot;
     if(!link){
-        shot=host.create_heap_shot();scheduler::initialize_link(shot->link,reinterpret_cast<scheduler::Node*>(shot));prepend(owner.active,shot->link);
+        shot=host.create_heap_shot();if(!shot)return nullptr;
+        scheduler::initialize_link(shot->link,reinterpret_cast<scheduler::Node*>(shot));prepend(owner.active,shot->link);
         shot->flags=owner.field_12460|0x1000000u;select_context(*shot,0,host.session());advance_shot_handle(owner);
     }else{
         scheduler::unlink(*link);prepend(owner.active,*link);shot=reinterpret_cast<Shot*>(link->value);shot->flags=owner.field_12460;advance_shot_handle(owner);

@@ -71,8 +71,11 @@ int hit_shot_callback(Shot& shot,unsigned index,const sprite::Vec3& position,con
         created->period=index==6?4:2;if(index!=6){created->motion.field_18=0.3f;created->motion.angle_1c=ecl::math::wrap_angle(-pi/2.0f);created->angle=ecl::math::wrap_angle(-pi/2.0f);}created->flags|=64;
         env.interrupt(shot.handle_18,1);shot.fields_98[1]=2;
         if(index==6){shot.motion.field_18=2;created->motion=shot.motion;}
-        auto* previous=host.damage(shot.fields_b8[9]);if(!previous)return 0;env.retire_damage(*previous);shot.fields_b8[9]=0;
-        if(index!=6){shot.motion.field_18=0.3f;previous->motion=shot.motion;} //original writes the retired region
+        auto* previous=host.damage(shot.fields_b8[9]);if(!previous)return 0;
+        if(index!=6){shot.motion.field_18=0.3f;previous->motion=shot.motion;}
+        // The original writes this motion after retirement. A heap backed
+        // damage region may be freed by retire_damage, so finish the write first.
+        env.retire_damage(*previous);shot.fields_b8[9]=0;
         host.sound_at(65,shot.motion.position.x);return std::bit_cast<int>(shot.fields_98[5]);
     }
     case 5:host.sound_at(40,position.x);return service.default_hit(shot); //504180
