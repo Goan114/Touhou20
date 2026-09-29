@@ -94,13 +94,13 @@ void Renderer::resize_surface(u32 id,u32 previousScale){
  boundTexture=readFramebuffer=drawFramebuffer=~0u;
 }
 bool Renderer::initialize(){
- if(!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_EVENTS)){failure=SDL_GetError();return false;}
+ if(!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_EVENTS)){failure=SDL_GetError();std::fprintf(stderr,"SDL renderer: SDL_Init failed: %s\n",failure.c_str());return false;}
  SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,SDL_GL_CONTEXT_PROFILE_ES);SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION,3);SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION,0);
  SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE,0);SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,0);SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE,0);SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);
  const int outputWidth=version==20?1280:640,outputHeight=version==20?960:480;
- window=SDL_CreateWindow(version==8?"Touhou 08":version==20?"Touhou 20":"Touhou 10",outputWidth,outputHeight,SDL_WINDOW_OPENGL);if(!window){failure=SDL_GetError();return false;}
+ window=SDL_CreateWindow(version==8?"Touhou 08":version==20?"Touhou 20":"Touhou 10",outputWidth,outputHeight,SDL_WINDOW_OPENGL);if(!window){failure=SDL_GetError();std::fprintf(stderr,"SDL renderer: SDL_CreateWindow failed: %s\n",failure.c_str());return false;}
  SDL_SetWindowSize(window,outputWidth,outputHeight);
- context=SDL_GL_CreateContext(window);if(!context){failure=SDL_GetError();return false;}SDL_GL_SetSwapInterval(1);drawState=DrawStateCache{};
+ context=SDL_GL_CreateContext(window);if(!context){failure=SDL_GetError();std::fprintf(stderr,"SDL renderer: SDL_GL_CreateContext failed: %s\n",failure.c_str());return false;}SDL_GL_SetSwapInterval(1);drawState=DrawStateCache{};
  std::string source=vertexSource;if((version==10||version==20)&&touhou_clip_control()){replace(source,"position.z*2.0-1.0","position.z");replace(source,"gl_Position.z=gl_Position.z*2.0-gl_Position.w;","");}
  vertex=shader(GL_VERTEX_SHADER,source);glGenBuffers(1,&vertices.id);glGenBuffers(1,&indices.id);glGenBuffers(1,&instances.id);
  glActiveTexture(GL_TEXTURE0);buildingGeneric=true;select(State{});generic=*program;programs.clear();buildingGeneric=false;
@@ -184,6 +184,22 @@ Renderer::GPU& Renderer::surface(u32 h){
   g.version=s.version;return g;
  }
  if(g.version!=s.version){
+  // TH20's dynamic text atlas is 2048x2048, but LockRect normally changes
+  // only the glyph rectangle. Preserve the original rectangle granularity on
+  // WebGL instead of converting and uploading the full 16 MiB atlas for every
+  // dialogue line.
+  if(version==20&&g.version!=~0u&&s.pixelScale==1&&s.format==PixelFormat::Bgra8&&s.dirtyW&&s.dirtyH&&
+     s.dirtyX+s.dirtyW<=s.width&&s.dirtyY+s.dirtyH<=s.height){
+   const u32 bytes=s.dirtyW*s.dirtyH*4u;stats.uploadBytes+=bytes;pixels.resize(bytes);
+   for(u32 y=0;y<s.dirtyH;++y)for(u32 x=0;x<s.dirtyW;++x){
+    const u8* p=s.data+(s.dirtyY+y)*s.pitch+(s.dirtyX+x)*4u;
+    u8* out=pixels.data()+(y*s.dirtyW+x)*4u;
+    out[0]=p[2];out[1]=p[1];out[2]=p[0];out[3]=p[3];
+   }
+   bind_texture(g.texture);glPixelStorei(GL_UNPACK_ALIGNMENT,1);
+   glTexSubImage2D(GL_TEXTURE_2D,0,s.dirtyX,s.dirtyY,s.dirtyW,s.dirtyH,GL_RGBA,GL_UNSIGNED_BYTE,pixels.data());
+   g.version=s.version;g.rendered=false;return g;
+  }
   stats.uploadBytes+=s.size;bind_texture(g.texture);glPixelStorei(GL_UNPACK_ALIGNMENT,1);GLenum format=GL_RGBA,type=GL_UNSIGNED_BYTE,internal=GL_RGBA8;
   bool rgb=s.format==PixelFormat::Bgr8||s.format==PixelFormat::Bgrx8||s.format==PixelFormat::Rgb565;u32 channels=rgb?3:4;pixels.resize(s.width*s.height*(s.format==PixelFormat::Argb4444?2:channels));
   if(s.format==PixelFormat::Argb4444){for(u32 y=0;y<s.height;y++)for(u32 x=0;x<s.width;x++){uint16_t n;std::memcpy(&n,s.data+y*s.pitch+x*2,2);n=(n<<4)|(n>>12);std::memcpy(pixels.data()+(y*s.width+x)*2,&n,2);}type=GL_UNSIGNED_SHORT_4_4_4_4;internal=GL_RGBA4;}
@@ -205,6 +221,7 @@ Renderer::GPU& Renderer::surface(u32 h){
   if(g.version==~0u)glTexImage2D(GL_TEXTURE_2D,0,internal,s.width*s.pixelScale,s.height*s.pixelScale,0,format,type,pixels.data());else glTexSubImage2D(GL_TEXTURE_2D,0,0,0,s.width*s.pixelScale,s.height*s.pixelScale,format,type,pixels.data());g.version=s.version;g.rendered=false;
  }return g;
 }
+u32 Renderer::revision(u32 id) const{auto it=surfaces.find(id);return it==surfaces.end()?~0u:it->second.version;}
 Renderer::GPU& Renderer::target(u32 id,u32 depthId){auto& g=surface(id);GLuint buffer=0;bool stencil=false;if(depthId){auto& d=depths[depthId];if(!d.buffer){auto s=resolve(owner,depthId);d.stencil=s.format==PixelFormat::Depth24Stencil8;glGenRenderbuffers(1,&d.buffer);glBindRenderbuffer(GL_RENDERBUFFER,d.buffer);glRenderbufferStorage(GL_RENDERBUFFER,d.stencil?GL_DEPTH24_STENCIL8:s.format==PixelFormat::Depth16?GL_DEPTH_COMPONENT16:GL_DEPTH_COMPONENT24,s.width*s.pixelScale,s.height*s.pixelScale);}buffer=d.buffer;stencil=d.stencil;}bind_framebuffer(GL_FRAMEBUFFER,g.framebuffer);if(g.attached!=buffer){glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,buffer);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_STENCIL_ATTACHMENT,GL_RENDERBUFFER,stencil?buffer:0);g.attached=buffer;}return g;}
 void Renderer::prepare(u32 h){surface(h);}
 void Renderer::draw(Topology primitive,u32 count,const void* data,u32 stride,const void* index,IndexType indexFormat){

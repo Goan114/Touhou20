@@ -3,7 +3,6 @@
 #include <thread>
 #include <cstddef>
 #ifdef TH_SDL3
-#include <cstdio>
 #include <utility>
 #endif
 
@@ -19,14 +18,11 @@ class inline_thread {
 public:
     inline_thread() noexcept = default;
     template<typename F, typename... A> explicit inline_thread(const char* tag, F&& f, A&&... a) {
-        std::fprintf(stderr, "worker[%s]: begin\n", tag);
+        (void)tag; // the browser runtime has no thread to name; kept for call-site parity
         std::forward<F>(f)(std::forward<A>(a)...);
-        std::fprintf(stderr, "worker[%s]: end\n", tag);
     }
     template<typename F, typename... A> explicit inline_thread(F&& f, A&&... a) {
-        std::fprintf(stderr, "worker[?]: begin\n");
         std::forward<F>(f)(std::forward<A>(a)...);
-        std::fprintf(stderr, "worker[?]: end\n");
     }
     inline_thread(inline_thread&&) noexcept = default;
     inline_thread& operator=(inline_thread&&) noexcept = default;

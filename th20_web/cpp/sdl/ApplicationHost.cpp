@@ -38,12 +38,6 @@ touhou::sdl::FrameCadence cadence;
 // the browser runtime because display modes never change).
 int game_tick() try {
     auto& w = pe::window_state;
-    static unsigned tick_count = 0;
-    static int last_scene = -1;
-    const int scene = pe::graphics_state.field_0b0c;
-    if (tick_count < 3 || scene != last_scene || tick_count % 600 == 0)
-        std::fprintf(stderr, "tick %u scene %d\n", tick_count, scene);
-    ++tick_count; last_scene = scene;
     auto& g = pe::graphics_state;
     auto& config = g.configuration;
     if (w.quit_requested != 0) return 1;

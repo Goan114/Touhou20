@@ -6,6 +6,7 @@
 #include "../platform/Graphics.hpp"
 #include "Renderer.hpp"
 #include <deque>
+#include <array>
 #include <map>
 #include <vector>
 #include <cstdio>
@@ -21,6 +22,8 @@ struct Resource {
     Surface s{};
     std::vector<u8> bytes;
     bool scalable=false;
+    std::array<std::int32_t,4> lock_rect{};
+    bool locked=false;
 };
 struct Host {
     std::map<u32, Resource> resources;
@@ -70,7 +73,15 @@ PipelineState& GraphicsDevice::pipeline() { return host.gpu->pipeline(); }
 bool GraphicsDevice::create(u32 width, u32 height, PixelFormat back_format, u32 /*present_interval*/) {
     if (!host.gpu) {
         host.gpu = std::make_unique<Renderer>(20, Host::resolve, &host);
-        if (!host.gpu->initialize()) return false;
+        if (!host.gpu->initialize()) {
+            // Report the real failure instead of letting the next backbuffer
+            // candidate "succeed" against a renderer that was never created:
+            // that produced a device with no GL context and a game that threw
+            // on its first texture. No caller can recover, so fail here.
+            std::fprintf(stderr, "SDL TH20 graphics device: WebGL initialization failed: %s\n", host.gpu->error());
+            host.gpu.reset();
+            return false;
+        }
     }
     host.density=host.gpu->refresh_output_size();
     if (host.back) { host.erase(host.back); host.erase(host.depth); }
@@ -185,17 +196,34 @@ TextureLock GraphicsDevice::lock(Texture* texture, const std::int32_t* rect) {
     }
     host.gpu->read(texture->id, missing_cpu_copy); // restore discarded atlases or read modified targets
     auto& s = resource.s;
+    // If the GPU already consumed the previous CPU revision, this lock starts
+    // a new dirty region. Otherwise accumulate with earlier not-yet-uploaded
+    // locks so no write is lost before the next draw.
+    if(host.gpu->revision(texture->id)==s.version)s.dirtyW=s.dirtyH=0;
+    const std::int32_t left=rect?rect[0]:0,top=rect?rect[1]:0;
+    const std::int32_t right=rect?rect[2]:static_cast<std::int32_t>(s.width);
+    const std::int32_t bottom=rect?rect[3]:static_cast<std::int32_t>(s.height);
+    resource.lock_rect={left,top,right,bottom};resource.locked=true;
+    if(right>left&&bottom>top){
+        if(!s.dirtyW||!s.dirtyH){s.dirtyX=left;s.dirtyY=top;s.dirtyW=right-left;s.dirtyH=bottom-top;}
+        else {const u32 r=std::max(s.dirtyX+s.dirtyW,static_cast<u32>(right)),b=std::max(s.dirtyY+s.dirtyH,static_cast<u32>(bottom));
+            s.dirtyX=std::min(s.dirtyX,static_cast<u32>(left));s.dirtyY=std::min(s.dirtyY,static_cast<u32>(top));s.dirtyW=r-s.dirtyX;s.dirtyH=b-s.dirtyY;}
+    }
     u8* data = s.data;
     if (rect) data += rect[1] * s.pitch + rect[0] * pixel_bytes(s.format);
     return {data, static_cast<std::int32_t>(s.pitch)};
 }
 
 void GraphicsDevice::unlock(Texture* texture) {
-    if (texture && texture->id) host.get(texture->id).s.version++;
+    if (texture && texture->id) {auto& r=host.get(texture->id);r.locked=false;r.s.version++;}
 }
 
 void GraphicsDevice::add_dirty_rect(Texture* texture) {
-    if (texture && texture->id) host.get(texture->id).s.version++;
+    // copy_surface() is a GPU blit and advances both renderer and logical
+    // revisions already. D3D9's AddDirtyRect is only a managed-texture hint;
+    // incrementing the CPU revision here would upload a stale CPU copy back
+    // over the freshly blitted GPU pixels.
+    (void)texture;
 }
 
 void GraphicsDevice::preload(Texture* texture) {

@@ -17,7 +17,7 @@ using u32=uint32_t;using i32=int32_t;using u8=uint8_t;
 using namespace touhou::graphics;
 // Width, height, pitch and CPU data retain D3D logical units. pixelScale only
 // controls GPU storage and rasterization; gameplay never sees physical pixels.
-struct Surface {u32 handle=0,width=0,height=0;PixelFormat format=PixelFormat::Bgra8;u32 pitch=0;u8* data=nullptr;u32 size=0,version=0;u32 pixelScale=1;};
+struct Surface {u32 handle=0,width=0,height=0;PixelFormat format=PixelFormat::Bgra8;u32 pitch=0;u8* data=nullptr;u32 size=0,version=0;u32 pixelScale=1;u32 dirtyX=0,dirtyY=0,dirtyW=0,dirtyH=0;};
 struct Viewport {u32 x=0,y=0,width=640,height=480;float min=0,max=1;};
 struct Statistics {u32 calls=0,batches=0,uploadBytes=0,readBytes=0,frames=0,presentations=0,bufferReplacements=0,bufferSubUpdates=0,vertexUploadBytes=0,directBytes=0,copiedBytes=0,layoutSetups=0,textureBinds=0,framebufferBinds=0,programCompiles=0,genericBatches=0,resamples=0;};
 struct State {
@@ -33,6 +33,7 @@ public:
     Renderer(int version,Resolve,void*);~Renderer();
     bool initialize();void flush();void discard();bool commit();
     u32 refresh_output_size();
+    u32 revision(u32 id) const;
     void resize_surface(u32 id,u32 previousScale);
     PipelineState& pipeline() override { return state.pipeline; }
     void transform(MatrixKind,const void*);void viewport(const Viewport&);
