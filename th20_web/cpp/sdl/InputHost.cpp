@@ -10,6 +10,9 @@
 #include "../../../source_reconstruction/player_entity/owner.hpp"
 #include "../../../source_reconstruction/hud_system/hud.hpp"
 #include "../../../source_reconstruction/pause_system/pause.hpp"
+#include "../../../source_reconstruction/platform_services/services.hpp"
+#include "../../../source_reconstruction/replay_system/replay.hpp"
+#include "../../../source_reconstruction/gameplay/loading_dependencies.hpp"
 namespace th20::source::gameplay { class GameController; extern GameController* controller; }
 #include "../platform/Time.hpp"
 #include "../../../portable/input/TouchController.hpp"
@@ -32,7 +35,7 @@ bool touch_keys[256]{};
 // units), plus the pulses the shared controller produced this frame so the
 // browser regression check can observe the menu path.
 float analog_x=0.f,analog_y=0.f;
-bool analog_active=false,confirm_pulse=false,escape_pulse=false;
+bool analog_active=false,analog_unlimited=false,confirm_pulse=false,escape_pulse=false;
 // Last motion code the shared controller produced this frame (1 = drag towards
 // the finger, 2 = unlimited drag) and sticky one-shot pulse counters. The
 // counters exist because a pulse lasts only a few logical frames, so a browser
@@ -73,7 +76,10 @@ touhou::input::TouchState touch_state() {
     // menu. Menu context is what lets a tap confirm and a two-finger tap cancel
     // instead of driving the player and firing.
     const bool menu = in_game && pause::controller() && pause::controller()->state != 0;
-    s.context = dialogue ? 2 : (in_game && !menu ? 1 : 0);
+    // A pause opened during dialogue owns the gesture until it closes. During
+    // playback, touch must never alter the recorded input stream.
+    const bool playback = replay::controller() && replay::controller()->mode == 1;
+    s.context = menu ? 0 : playback ? 3 : dialogue ? 2 : in_game ? 1 : 0;
     if (s.context == 1) {
         auto* player = static_cast<player_entity::Player*>(game_session::context(0).objects_04[0]);
         if (player && player->state == 1) {
@@ -152,8 +158,10 @@ void pump_events() {
         else if (event.type == SDL_EVENT_FINGER_CANCELED) { gestures.cancel_transient(); }
         else if (event.type == SDL_EVENT_FINGER_DOWN || event.type == SDL_EVENT_FINGER_MOTION || event.type == SDL_EVENT_FINGER_UP) {
             const auto type = event.type == SDL_EVENT_FINGER_DOWN ? 0 : event.type == SDL_EVENT_FINGER_MOTION ? 1 : 2;
-            gestures.pointer(type, int(event.tfinger.fingerID), event.tfinger.x, event.tfinger.y, SDL_GetTicks(),
-                             touch_state(), (synthetic_keys[16] & 0x80) != 0);
+            const auto state = touch_state();
+            if (state.context != 3)
+                gestures.pointer(type, int(event.tfinger.fingerID), event.tfinger.x, event.tfinger.y, SDL_GetTicks(),
+                                 state, (synthetic_keys[16] & 0x80) != 0);
         }
     }
 }
@@ -184,6 +192,17 @@ void sample_native_input() {
     pump_events();
     ++sample_ticks;
     const auto state = touch_state();
+    if (state.context == 3) {
+        gestures.cancel_transient();
+        // Keep the gesture controller's context in sync for the first menu
+        // input after playback ends, without forwarding a replay input.
+        (void)gestures.sample(state, SDL_GetTicks(), false, false);
+        std::memset(touch_keys, 0, sizeof touch_keys);
+        analog_active = analog_unlimited = confirm_pulse = escape_pulse = false;
+        analog_x = analog_y = 0.f;
+        last_motion = 0;
+        return;
+    }
     const auto sample = gestures.sample(state, SDL_GetTicks(), (synthetic_keys[16] & 0x80) != 0,
         (synthetic_keys[37] | synthetic_keys[38] | synthetic_keys[39] | synthetic_keys[40]) & 0x80);
     std::memcpy(touch_keys, sample.keys, sizeof(touch_keys));
@@ -192,18 +211,28 @@ void sample_native_input() {
     last_motion = sample.motion;
     if (confirm_pulse) ++confirm_pulses;
     if (escape_pulse) ++escape_pulses;
-    analog_active = false; analog_x = analog_y = 0.f;
+    analog_active = false; analog_unlimited = false; analog_x = analog_y = 0.f;
     if (sample.motion && state.ready) {
         // Free-direction movement: the shared controller owns the reachable
         // target (already clamped to the playfield), so this frame's vector is
-        // simply the reach towards the finger, limited to the player's own
-        // speed. TH20's game input stays eight-way; this is the port's
-        // direct-touch path and it is only active while a gesture exists.
-        const float speed = std::max(1.f, sample.keys[16] ? state.slow : state.fast) * 128.f;
+        // simply the reach towards the finger. The ordinary drag is rate-limited
+        // to the player's own speed; the unlimited drag (motion 2) is not, which
+        // is what the Launcher's "touch-unlimited" option selects.
         float dx = (sample.x - state.x) * 128.f, dy = (sample.y - state.y) * 128.f;
-        touhou::input::limit_vector(dx, dy, speed);
+        analog_unlimited = sample.motion == 2;
+        if (!analog_unlimited) {
+            const float speed = std::max(1.f, sample.keys[16] ? state.slow : state.fast) * 128.f;
+            touhou::input::limit_vector(dx, dy, speed);
+        }
         analog_x = dx; analog_y = dy; analog_active = (dx != 0.f || dy != 0.f);
     }
+    // A new run's replay recording (mode 0, before its first frame, new-game
+    // state) starts a clean run-level unlimited-drag marker. Stage transitions
+    // reuse the same recording, so the marker survives them.
+    if (const auto* recorder = replay::controller();
+        recorder && recorder->mode == 0 && recorder->frame == -1 &&
+        program_entry::graphics_state.field_0b18)
+        platform::set_unlimited_touch_used(false);
     if (!state.ready) {
         // Menu/dialogue/dialogue-skip contexts: the shared controller emits Z
         // for a tap and Escape for a two-finger tap. TH20's menus read the
@@ -223,9 +252,12 @@ void sample_native_input() {
 }
 
 // Port-owned direct-touch source for the recovered movement (TouchMotion.hpp).
+// Reaching here means gameplay is consuming this frame's movement, so a
+// non-zero unlimited movement is what marks the run for the Launcher protocol.
 bool analog_motion(float& x, float& y) {
     if (!analog_active) return false;
     x = analog_x; y = analog_y;
+    if (analog_unlimited) platform::set_unlimited_touch_used(true);
     return true;
 }
 
@@ -261,7 +293,9 @@ __attribute__((export_name("sdl_keys_clear"))) void sdl_keys_clear() {
     th20::source::input::gestures.reset();
 }
 __attribute__((export_name("sdl_touch"))) void sdl_touch(std::uint32_t type, std::int32_t id, float x, float y) {
-    th20::source::input::gestures.pointer(int(type), id, x, y, SDL_GetTicks(), th20::source::input::touch_state(), false);
+    const auto state = th20::source::input::touch_state();
+    if (state.context != 3)
+        th20::source::input::gestures.pointer(int(type), id, x, y, SDL_GetTicks(), state, false);
 }
 __attribute__((export_name("sdl_touch_cancel"))) void sdl_touch_cancel() { th20::source::input::gestures.cancel_transient(); }
 // Read-only coordinates for browser regression checks. Values are game units,
@@ -296,9 +330,11 @@ __attribute__((export_name("sdl_touch_controls"))) void sdl_touch_controls(std::
 // previous read:
 // [context, dragging, analog_active, analog_x, analog_y, confirm_pulse, escape_pulse, pause_state,
 //  enabled, ready, motion, buttons_current, buttons_pressed, window_active,
-//  confirm_pulses, escape_pulses, sample_ticks].
+//  confirm_pulses, escape_pulses, sample_ticks, unlimited_used, movement_mode, unlimited_mode,
+//  pause_substate, pause_cursor, replay_mode, replay_frame, replay_stage, replay_cursor,
+//  dialogue, replay_selection].
 __attribute__((export_name("sdl_touch_probe"))) const float* sdl_touch_probe() {
-    static float out[17]{};
+    static float out[28]{};
     using namespace th20::source;
     const auto& g = input::gestures;
     out[0] = float(g.current_context());
@@ -319,6 +355,20 @@ __attribute__((export_name("sdl_touch_probe"))) const float* sdl_touch_probe() {
     out[14] = float(input::confirm_pulses);
     out[15] = float(input::escape_pulses);
     out[16] = float(input::sample_ticks);
+    out[17] = platform::unlimited_touch_used() ? 1.f : 0.f;
+    out[18] = float(g.mode);
+    out[19] = g.unlimited ? 1.f : 0.f;
+    const auto* paused = pause::controller();
+    const auto* recorder = replay::controller();
+    out[20] = paused ? float(paused->substate) : -1.f;
+    out[21] = paused ? float(paused->cursor.current) : -1.f;
+    out[22] = recorder ? float(recorder->mode) : -1.f;
+    out[23] = recorder ? float(recorder->frame) : -1.f;
+    out[24] = recorder ? float(recorder->active_stage) : -1.f;
+    out[25] = recorder && recorder->active_stage >= 0 && recorder->active_stage < 8
+        ? float(recorder->playback[recorder->active_stage].frame) : -1.f;
+    out[26] = hud::controller && hud::controller->collecting ? 1.f : 0.f;
+    out[27] = float(gameplay::replay_selection);
     input::confirm_pulses = input::escape_pulses = 0;
     return out;
 }

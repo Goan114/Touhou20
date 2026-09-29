@@ -7,6 +7,7 @@
 #include "platform/Files.hpp"
 #endif
 #include "../gameplay/player_state.hpp"
+#include "../platform_services/services.hpp"
 #include "../program_entry/program_entry.hpp"
 #include "../platform_window/frame_statistics.hpp"
 #include "../platform_window/platform_window.hpp"
@@ -54,7 +55,10 @@ void save(ReplayInf& o,const char* filename,const char* name,int,int append_term
     o.user->fields_d0[1]=count;progress::write(o.user,0x18,gameplay::player_state::score(game_session::player(0)));
     const auto& stats=*static_cast<platform_window::FrameStatistics*>(platform_window::unrecovered::scheduler_object_005c4a00);
     const double ratio=_mm_cvtsd_f64(_mm_div_sd(_mm_set_sd(stats.actual_frames),_mm_set_sd(stats.target_frames)));
-    const float slow=recovered::add32(100.f,-recovered::mul32(static_cast<float>(ratio),100.f));progress::write(o.user,0xd0,slow);
+    // A run that consumed an unlimited drag is saved with a 100% processing-drop
+    // rate, matching the Launcher touch protocol and the th08/th10 ports.
+    const float slow=platform::unlimited_touch_used()?100.f:
+        recovered::add32(100.f,-recovered::mul32(static_cast<float>(ratio),100.f));progress::write(o.user,0xd0,slow);
     Bytes unpacked;unpacked.reserve(size);append(unpacked,o.user,0x100);
     for(int i=0;i<8;++i)if(auto* record=o.stages[i]){append(unpacked,record,0x2a0);chunks(o,i,[&](RecordingChunk& chunk){append(unpacked,chunk.inputs,chunk.frame_count()*6u);});chunks(o,i,[&](RecordingChunk& chunk){append(unpacked,chunk.fps,chunk.fps_count());});}
     Bytes packed;resources::with_shared_dictionary([&](auto& dictionary){progress::LzssEncoder encoder(dictionary);packed=encoder.encode(unpacked);});

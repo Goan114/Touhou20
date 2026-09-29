@@ -16,4 +16,12 @@ void initialize_directories(program_entry::WindowStatePrefix&, runtime::Log&,
                             const wchar_t* appdata, const wchar_t* module_filename);
 int initialize_platform(program_entry::WindowStatePrefix&, runtime::Log&); // 0x41b4f0, real OS side effects
 double read_clock(program_entry::WindowStatePrefix&); // 0x41cb10
+// Direct-touch port extension with no original counterpart. The browser adapter
+// marks a run once a non-zero unlimited drag movement has been consumed by
+// gameplay, and clears the mark when a new run starts; the recovered Result and
+// Replay writers read it to force a 100% processing-drop rate (see the
+// eagler-touhou touch protocol). A native build never sets it, so its computed
+// rates and the CPU comparisons are unchanged.
+bool unlimited_touch_used() noexcept;
+void set_unlimited_touch_used(bool) noexcept;
 }

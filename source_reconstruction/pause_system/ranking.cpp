@@ -1,4 +1,5 @@
 #include "menu_support.hpp"
+#include "../platform_services/services.hpp"
 #include "../progress_state/manager.hpp"
 #include "../gameplay/player_state.hpp"
 #include "../platform_window/platform_window.hpp"
@@ -24,7 +25,10 @@ int insert_high_score(pr::Profile& profile){ //50f170
     auto* record=list+index*40;pr::write(record,0,score());record[9]=static_cast<std::uint8_t>(continue_count(session));record[8]=static_cast<std::uint8_t>(ps::stage(session.player_table));
     pr::write(record,24,_time64(nullptr));strcpy_s(reinterpret_cast<char*>(record+10),10,"        ");
     const auto& stats=*static_cast<platform_window::FrameStatistics*>(platform_window::unrecovered::scheduler_object_005c4a00);
-    const float percentage=100.f-static_cast<float>(stats.actual_frames/stats.target_frames)*100.f;pr::write(record,32,percentage);return index;
+    // The browser adapter reports a consumed unlimited drag here; the protocol
+    // forces the recorded processing-drop rate to 100% for such a run.
+    const float percentage=platform::unlimited_touch_used()?100.f:
+        100.f-static_cast<float>(stats.actual_frames/stats.target_frames)*100.f;pr::write(record,32,percentage);return index;
 }
 namespace {
 void save_practice_score(pr::Profile& profile){ //50f2f0

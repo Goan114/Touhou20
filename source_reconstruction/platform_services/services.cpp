@@ -13,6 +13,8 @@
 
 namespace th20::source::platform {
 namespace {
+// Direct-touch port extension state; see services.hpp.
+bool unlimited_touch_marker = false;
 struct Handle {
 #ifdef TH_SDL3
     std::uint32_t value;
@@ -176,4 +178,6 @@ double read_clock(program_entry::WindowStatePrefix& w) {
     return multimedia_clock(timeGetTime(),w.clock_offset);
 #endif
 }
+bool unlimited_touch_used() noexcept { return unlimited_touch_marker; }
+void set_unlimited_touch_used(bool value) noexcept { unlimited_touch_marker = value; }
 }
