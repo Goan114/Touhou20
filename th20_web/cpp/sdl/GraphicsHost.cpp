@@ -46,8 +46,12 @@ struct Host {
         r.s.pixelScale = renderTarget ? density : 1;
         r.s.pitch = w * pixel_bytes(f);
         r.s.size = r.s.pitch * h;
-        r.bytes.assign(r.s.size, 0);
-        r.s.data = r.bytes.data();
+        // Render targets live on the GPU. Allocate a CPU copy only if a
+        // caller explicitly locks one for readback or editing.
+        if (!renderTarget) {
+            r.bytes.assign(r.s.size, 0);
+            r.s.data = r.bytes.data();
+        }
         return id;
     }
     void erase(u32 id) { gpu->release(id); resources.erase(id); }
@@ -173,8 +177,14 @@ void GraphicsDevice::release_texture(Texture*& texture) {
 
 TextureLock GraphicsDevice::lock(Texture* texture, const std::int32_t* rect) {
     if (!texture || !texture->id) return {};
-    host.gpu->read(texture->id); // sync GPU results (render targets, copies) back to the CPU store
-    auto& s = host.get(texture->id).s;
+    auto& resource = host.get(texture->id);
+    const bool missing_cpu_copy = resource.bytes.empty();
+    if (missing_cpu_copy) {
+        resource.bytes.assign(resource.s.size, 0);
+        resource.s.data = resource.bytes.data();
+    }
+    host.gpu->read(texture->id, missing_cpu_copy); // restore discarded atlases or read modified targets
+    auto& s = resource.s;
     u8* data = s.data;
     if (rect) data += rect[1] * s.pitch + rect[0] * pixel_bytes(s.format);
     return {data, static_cast<std::int32_t>(s.pitch)};
@@ -190,6 +200,15 @@ void GraphicsDevice::add_dirty_rect(Texture* texture) {
 
 void GraphicsDevice::preload(Texture* texture) {
     if (texture && texture->id) host.gpu->prepare(texture->id);
+}
+
+void GraphicsDevice::discard_cpu_copy(Texture* texture) {
+    if (!texture || !texture->id || texture->render_target) return;
+    auto& resource = host.get(texture->id);
+    if (resource.bytes.empty()) return;
+    preload(texture);
+    resource.s.data = nullptr;
+    std::vector<u8>().swap(resource.bytes);
 }
 
 u32 GraphicsDevice::texture_width(const Texture* texture) const { return texture ? texture->width : 0; }

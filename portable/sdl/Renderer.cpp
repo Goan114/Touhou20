@@ -126,6 +126,12 @@ void Renderer::bind_framebuffer(GLenum target,GLuint id){
 void Renderer::draw_batch(u32 count,const void* data,u32 stride){
  // The game already coalesced these triangles. Consume while its arena is
  // valid, without retaining a pointer to a buffer the next sprite can reuse.
+ if(version==20){
+  // Stage backgrounds and dense bullet scenes split the game's sprite arena
+  // into many small submissions. Copy adjacent matching batches into the
+  // renderer's bounded staging buffer so WebGL receives fewer draw calls.
+  draw(Topology::Triangles,count,data,stride);return;
+ }
  flush();++stats.calls;state.stride=stride;stats.directBytes+=count*3*stride;
  issue(state,Topology::Triangles,count,data,count*3*stride,nullptr,IndexType::UInt16,nullptr,0);
 }
@@ -165,6 +171,10 @@ u32 Renderer::upload(Stream& s,GLenum target,const void* bytes,u32 count,u32 min
 }
 Renderer::GPU& Renderer::surface(u32 h){
  auto s=resolve(owner,h);if(!s.handle||!s.width||!s.height){std::fprintf(stderr,"SDL invalid surface %u\n",h);std::abort();}auto& g=surfaces[h];if(!g.texture){glGenTextures(1,&g.texture);glGenFramebuffers(1,&g.framebuffer);bind_texture(g.texture);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);bind_framebuffer(GL_FRAMEBUFFER,g.framebuffer);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,g.texture,0);}
+ if(!s.data){
+  if(g.version==~0u){bind_texture(g.texture);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,s.width*s.pixelScale,s.height*s.pixelScale,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);}
+  g.version=s.version;return g;
+ }
  if(g.version!=s.version){
   stats.uploadBytes+=s.size;bind_texture(g.texture);glPixelStorei(GL_UNPACK_ALIGNMENT,1);GLenum format=GL_RGBA,type=GL_UNSIGNED_BYTE,internal=GL_RGBA8;
   bool rgb=s.format==PixelFormat::Bgr8||s.format==PixelFormat::Bgrx8||s.format==PixelFormat::Rgb565;u32 channels=rgb?3:4;pixels.resize(s.width*s.height*(s.format==PixelFormat::Argb4444?2:channels));
@@ -192,7 +202,7 @@ void Renderer::prepare(u32 h){surface(h);}
 void Renderer::draw(Topology primitive,u32 count,const void* data,u32 stride,const void* index,IndexType indexFormat){
  stats.calls++;state.stride=stride;
  if(index||primitive<Topology::Triangles||primitive>Topology::Fan){flush();issue(state,primitive,count,data,vertex_count(primitive,count)*stride,index,indexFormat,nullptr,0);return;}
- const bool instance=version==10&&state.layout==attributes(VertexLayout::WorldUv)&&stride==20&&primitive==Topology::Strip&&count==2;
+ const bool instance=(version==10||version==20)&&state.layout==attributes(VertexLayout::WorldUv)&&stride==20&&primitive==Topology::Strip&&count==2;
  if(instance){if(batching&&(!instancing||!equal(batchState,state,true)||quad.size()!=80||std::memcmp(quad.data(),data,80)))flush();if(!batching){batchState=state;quad.assign(static_cast<const u8*>(data),static_cast<const u8*>(data)+80);batching=instancing=true;}const auto old=worlds.size();worlds.resize(old+68);std::memcpy(worlds.data()+old,state.matrix[0].data(),64);std::memcpy(worlds.data()+old+64,&state.pipeline.textureFactor,4);if(worlds.size()>=1024*68)flush();return;}
  if(batching&&(instancing||!equal(batchState,state)))flush();if(!batching){batchState=state;batching=true;instancing=false;}
  const auto* src=static_cast<const u8*>(data);const size_t start=batchBytes.size(),size=count*3*stride;stats.copiedBytes+=size;batchBytes.resize(start+size);auto* dest=batchBytes.data()+start;
@@ -290,7 +300,7 @@ bool Renderer::resample(u32 src,const i32* from,u32 dst,const i32* to,const floa
  // valid VAOs, while the regular draw cache must restore all pipeline state.
  drawState=DrawStateCache{};output.rendered=true;output.version=b.version+1;++stats.resamples;return true;
 }
-void Renderer::read(u32 id){flush();auto it=surfaces.find(id);if(it==surfaces.end()||!it->second.rendered)return;auto s=resolve(owner,id);auto& g=it->second;stats.readBytes+=s.size;pixels.resize(s.width*s.height*4);bind_framebuffer(GL_FRAMEBUFFER,g.framebuffer);glPixelStorei(GL_PACK_ALIGNMENT,1);
+void Renderer::read(u32 id,bool force){flush();auto it=surfaces.find(id);if(it==surfaces.end()||(!force&&!it->second.rendered))return;auto s=resolve(owner,id);auto& g=it->second;stats.readBytes+=s.size;pixels.resize(s.width*s.height*4);bind_framebuffer(GL_FRAMEBUFFER,g.framebuffer);glPixelStorei(GL_PACK_ALIGNMENT,1);
  GLuint readTexture=0,readFramebufferTemporary=0;
  if(s.pixelScale>1){
   glGenTextures(1,&readTexture);bind_texture(readTexture);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,s.width,s.height,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);

@@ -42,7 +42,7 @@ public:
     void copy(u32 source,const i32* rect,u32 target,const i32* point);
     void blit(u32 source,const i32* sourceRect,u32 target,const i32* destinationRect);
     bool resample(u32,const i32*,u32,const i32*,const float*,u32,u32);
-    void read(u32);void release(u32);void present(u32);void prepare(u32);
+    void read(u32,bool force=false);void release(u32);void present(u32);void prepare(u32);
     void render_imgui(const ImDrawData*,u32 target);
     const char* error()const{return failure.c_str();}
     int version;Resolve resolve;void* owner;

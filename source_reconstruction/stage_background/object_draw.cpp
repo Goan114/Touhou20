@@ -38,12 +38,15 @@ void draw_object_layer(Background& background,int layer){
     for(auto* instance=background.instances;static_cast<std::int16_t>(instance->object_id)>=0;++instance){auto& object=*background.objects[instance->object_id];if(static_cast<std::int8_t>(object.layer)!=layer)continue;
         if(cull_object(object,instance->position,f(background.state.fields_3294[8]),pe::graphics_state.viewports[3])){++background.rendered[1];instance->unknown&=0xfffe;continue;}
         object.flags|=2;
+#ifdef TH_SDL3
+        float object_rotation[16];
+        if(object.parameters[2]!=0.f)web::math::rotation_y(object_rotation,object.parameters[2]);
+#endif
         for(auto* primitive=reinterpret_cast<Primitive*>(&object+1);primitive->type>=0;primitive=reinterpret_cast<Primitive*>(reinterpret_cast<std::uint8_t*>(primitive)+primitive->size)){
             auto& a=background.primitive_animations[primitive->animation_index];if(primitive->type)continue;const float angle=a.base.vector_38.y;
             if((a.base.flags[0]&255)>3){const auto* parameters=reinterpret_cast<const float*>(primitive+1);s::Vec3 position{parameters[0],parameters[1],parameters[2]};if(object.parameters[2]!=0.f){
 #ifdef TH_SDL3
-                float rotation[16];web::math::rotation_y(rotation,object.parameters[2]);
-                const auto out=web::math::transform_coord(*reinterpret_cast<const web::math::Vec3*>(&position),rotation);position={out.x,out.y,out.z};
+                const auto out=web::math::transform_coord(*reinterpret_cast<const web::math::Vec3*>(&position),object_rotation);position={out.x,out.y,out.z};
 #else
                 D3DMATRIX rotation;sdk().rotation(&rotation,object.parameters[2]);s::Vec3 out;sdk().transform(&out,&position,&rotation);position=out;
 #endif

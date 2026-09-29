@@ -1,5 +1,6 @@
 #include "texture_load.hpp"
 #include "texture_edges.hpp"
+#include "../runtime_core/runtime_core.hpp"
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -59,6 +60,7 @@ int create_embedded_texture(TextureRecord& record,const std::uint8_t* thtx,UINT 
     // triangle+mirror downsample for tagged textures on small screens.
     web::load_surface_from_memory(context.device,record.texture,reinterpret_cast<const std::int32_t*>(&destination.left),thtx+16,
         read<std::uint32_t>(thtx+12),nullptr,is_downsampled?0x30004u:1u);
+    context.device.discard_cpu_copy(record.texture);
 #else
     IDirect3DSurface9* surface=nullptr;
     const auto status=library().create(&context.device,width,height,1,0,format?D3DFMT_A8R8G8B8:D3DFMT_UNKNOWN,D3DPOOL_MANAGED,&record.texture);
@@ -95,6 +97,12 @@ int create_external_texture(TextureRecord& record,UINT format,std::int32_t width
     if(surface)surface->Release();if(status!=S_OK)return -1;
 #endif
     repair_transparent_texels(*record.texture);record.bytes_per_pixel=4;
+#ifdef TH_SDL3
+    context.device.discard_cpu_copy(record.texture);
+    // WebGL keeps the decoded texture in the graphics host. The compressed
+    // source has no further use after the upload and can be reclaimed now.
+    if(record.unknown_04){runtime::release_bytes(reinterpret_cast<void*>(record.unknown_04));record.unknown_04=0;record.unknown_08=0;}
+#endif
     return th20::recovered::signed_bits(std::uint32_t(width)*std::uint32_t(height)*4u);
 }
 }

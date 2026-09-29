@@ -66,6 +66,8 @@ public:
     void add_dirty_rect(Texture*);
     // PreLoad: upload to the GPU now instead of on first use.
     void preload(Texture*);
+    // Immutable atlases no longer need a second decoded copy in WASM memory.
+    void discard_cpu_copy(Texture*);
     std::uint32_t texture_width(const Texture*) const;
     std::uint32_t texture_height(const Texture*) const;
 
