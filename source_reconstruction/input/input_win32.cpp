@@ -234,6 +234,16 @@ void Controller::sample_frame() {
     frame_input_kind=last_input_kind;
     state.slots[2].current=device_buttons(0).current|state.slots[3].current;
     state.slots[0].current=device_buttons(0).current|state.slots[3].current;
+#ifdef TH_SDL3
+    if(sdl_replay_input_locked()){
+        // Replay owns gameplay input. Preserve only the live pause action;
+        // hosted touch-fire, physical keys and gamepads must not perturb the
+        // playback simulation or its fast-forward scheduler.
+        state.slots[0].current&=0x100u;
+        state.slots[2].current=0;
+        state.slots[3].current=0;
+    }
+#endif
     for(auto& slot:state.slots) update_buttons(slot);
     ++frame;
 }

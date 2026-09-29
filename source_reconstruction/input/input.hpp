@@ -71,6 +71,9 @@ public:
 Host& win32_host();
 #ifdef TH_SDL3
 int read_scan_keyboard(std::uint8_t* output);
+// Browser playback keeps live device input out of gameplay/replay state while
+// still allowing the pause action. Native/oracle builds do not use this hook.
+bool sdl_replay_input_locked();
 #endif
 struct LegacyState {
     ButtonState slots[4]{};                 // original 0x5b88b0, stride 0x2c0

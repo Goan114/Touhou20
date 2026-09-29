@@ -12,6 +12,7 @@
 #include "../../../source_reconstruction/pause_system/pause.hpp"
 #include "../../../source_reconstruction/platform_services/services.hpp"
 #include "../../../source_reconstruction/replay_system/replay.hpp"
+#include "../../../source_reconstruction/runtime_state/state.hpp"
 #include "../../../source_reconstruction/gameplay/loading_dependencies.hpp"
 namespace th20::source::gameplay { class GameController; extern GameController* controller; }
 #include "../platform/Time.hpp"
@@ -45,6 +46,13 @@ unsigned confirm_pulses=0,escape_pulses=0;
 // Monotonic count of logical input samples. A browser check needs it to tell a
 // gesture that was ignored apart from a frame loop that is not ticking at all.
 unsigned sample_ticks=0;
+bool replay_probe_unlocked=false;
+// The Launcher's mobile Esc button is an out-of-band control rather than a
+// gameplay touch gesture. Replay playback suppresses every touch action that
+// could alter the recorded stream, but must still allow this one pause action
+// exactly like a physical Esc key.
+std::uint32_t launcher_escape_serial=0;
+int playback_escape_ticks=0;
 
 SDL_Gamepad* pads[4]{};
 constexpr SDL_GamepadButton pad_slots[]={SDL_GAMEPAD_BUTTON_SOUTH,SDL_GAMEPAD_BUTTON_EAST,SDL_GAMEPAD_BUTTON_WEST,
@@ -178,6 +186,12 @@ HRESULT Host::device_state(IDirectInputDevice8W* device, DIJOYSTATE2* output) { 
 
 Host& sdl_input_host() { return sdl_host; }
 
+bool sdl_replay_input_locked() {
+    const auto* recorder = replay::controller();
+    const auto* paused = pause::controller();
+    return recorder && recorder->mode == 1 && !(paused && paused->state != 0) && !replay_probe_unlocked;
+}
+
 int read_scan_keyboard(std::uint8_t* output) {
     std::memset(output, 0, 256);
     const bool* physical = SDL_GetKeyboardState(nullptr);
@@ -198,11 +212,24 @@ void sample_native_input() {
         // input after playback ends, without forwarding a replay input.
         (void)gestures.sample(state, SDL_GetTicks(), false, false);
         std::memset(touch_keys, 0, sizeof touch_keys);
-        analog_active = analog_unlimited = confirm_pulse = escape_pulse = false;
+        analog_active = analog_unlimited = confirm_pulse = false;
+        escape_pulse = playback_escape_ticks > 0;
+        if (playback_escape_ticks > 0) {
+            // Feed only the configured pause/menu binding. Do not forward the
+            // generic touch Escape/Bomb aliases used by menus, because those
+            // would become gameplay input during replay playback.
+            if (controller) {
+                const auto vk = controller->mappings[0].keyboard[3];
+                if (vk && vk < 256) touch_keys[vk] = true;
+            }
+            --playback_escape_ticks;
+            ++escape_pulses;
+        }
         analog_x = analog_y = 0.f;
         last_motion = 0;
         return;
     }
+    playback_escape_ticks = 0;
     const auto sample = gestures.sample(state, SDL_GetTicks(), (synthetic_keys[16] & 0x80) != 0,
         (synthetic_keys[37] | synthetic_keys[38] | synthetic_keys[39] | synthetic_keys[40]) & 0x80);
     std::memcpy(touch_keys, sample.keys, sizeof(touch_keys));
@@ -283,6 +310,9 @@ IDirectInputDevice8W* host_pad(unsigned index) {
 
 extern "C" {
 __attribute__((export_name("sdl_native_input"))) void sdl_native_input() { th20::source::input::sample_native_input(); }
+__attribute__((export_name("sdl_replay_probe_unlock"))) void sdl_replay_probe_unlock(std::uint32_t value) {
+    th20::source::input::replay_probe_unlocked = value != 0;
+}
 __attribute__((export_name("sdl_key"))) void sdl_key(const char* code, std::uint32_t down) {
     for (auto& k : th20::source::input::keyboard_map)
         if (!std::strcmp(code, k.code)) { k.hosted = down != 0; return; }
@@ -323,6 +353,14 @@ __attribute__((export_name("sdl_touch_mode"))) void sdl_touch_mode(std::uint32_t
 }
 __attribute__((export_name("sdl_touch_controls"))) void sdl_touch_controls(std::uint32_t shoot, std::uint32_t slow,
     std::uint32_t bomb, std::uint32_t escape, float x, float y) {
+    // Track the Launcher Esc serial independently of TouchController. The
+    // controller's transient pulses are intentionally cleared during replay,
+    // while the mobile pause button must remain available.
+    if (escape != th20::source::input::launcher_escape_serial) {
+        th20::source::input::launcher_escape_serial = escape;
+        if (th20::source::input::touch_state().context == 3)
+            th20::source::input::playback_escape_ticks = 1;
+    }
     th20::source::input::gestures.controls(shoot, slow, bomb, escape, x, y);
 }
 // Read-only touch diagnostics for the browser regression check. Reading drains
@@ -332,9 +370,11 @@ __attribute__((export_name("sdl_touch_controls"))) void sdl_touch_controls(std::
 //  enabled, ready, motion, buttons_current, buttons_pressed, window_active,
 //  confirm_pulses, escape_pulses, sample_ticks, unlimited_used, movement_mode, unlimited_mode,
 //  pause_substate, pause_cursor, replay_mode, replay_frame, replay_stage, replay_cursor,
-//  dialogue, replay_selection].
+//  dialogue, replay_selection, replay_applied_current, replay_applied_pressed,
+//  replay_applied_released, replay_expected_current, replay_expected_pressed,
+//  replay_expected_released, player_x, player_y, player_state, rng0_last].
 __attribute__((export_name("sdl_touch_probe"))) const float* sdl_touch_probe() {
-    static float out[28]{};
+    static float out[38]{};
     using namespace th20::source;
     const auto& g = input::gestures;
     out[0] = float(g.current_context());
@@ -369,6 +409,29 @@ __attribute__((export_name("sdl_touch_probe"))) const float* sdl_touch_probe() {
         ? float(recorder->playback[recorder->active_stage].frame) : -1.f;
     out[26] = hud::controller && hud::controller->collecting ? 1.f : 0.f;
     out[27] = float(gameplay::replay_selection);
+    const auto& shared = input::shared_state().slots[0];
+    out[28] = float(shared.retained_298[1]);
+    out[29] = float(shared.retained_298[4]);
+    out[30] = float(shared.retained_298[5]);
+    out[31] = out[32] = out[33] = -1.f;
+    if (recorder && recorder->mode == 1 && recorder->active_stage >= 0 && recorder->active_stage < 8) {
+        const auto& cursor = recorder->playback[recorder->active_stage];
+        if (cursor.input_cursor && cursor.inputs && cursor.input_cursor > cursor.inputs) {
+            const auto& expected = cursor.input_cursor[-1];
+            out[31] = float(expected.current);
+            out[32] = float(expected.pressed);
+            out[33] = float(expected.released);
+        }
+    }
+    out[34] = out[35] = out[36] = -1.f;
+    if (gameplay::controller) {
+        if (auto* p = static_cast<player_entity::Player*>(game_session::context(0).objects_04[0])) {
+            out[34] = p->position_614.x;
+            out[35] = p->position_614.y;
+            out[36] = float(p->state);
+        }
+    }
+    out[37] = float(state::random_streams[0].last);
     input::confirm_pulses = input::escape_pulses = 0;
     return out;
 }
