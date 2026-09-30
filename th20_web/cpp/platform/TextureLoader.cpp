@@ -1,5 +1,6 @@
 #include "TextureLoader.hpp"
 #include <cstring>
+#include <algorithm>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
@@ -26,9 +27,9 @@ void resample_triangle(const std::uint8_t* src, int sw, int sh, int sx0, int sy0
     const int rw = sx1 - sx0, rh = sy1 - sy0;
     std::vector<float> weights;
     std::vector<int> indices;
-    weights.resize((rw > rh ? rw : rh) * 4);
-    indices.resize((rw > rh ? rw : rh) * 4);
-    std::vector<std::uint8_t> temp(dw * sh * 4);
+    weights.resize(std::size_t(dw) * 4);
+    indices.resize(std::size_t(dw) * 4);
+    std::vector<std::uint8_t> temp(std::size_t(dw) * rh * 4);
     // horizontal pass: rw -> dw for every source row
     for (int x = 0; x < dw; ++x) {
         const float center = (x + 0.5f) * rw / dw - 0.5f;
@@ -48,7 +49,7 @@ void resample_triangle(const std::uint8_t* src, int sw, int sh, int sx0, int sy0
         for (int k = count; k < 4; ++k) { indices[x * 4 + k] = first; weights[x * 4 + k] = 0; }
         for (int k = 0; k < 4; ++k) weights[x * 4 + k] /= total;
     }
-    for (int y = 0; y < sh; ++y) {
+    for (int y = 0; y < rh; ++y) {
         for (int x = 0; x < dw; ++x) {
             float acc[4]{};
             for (int k = 0; k < 4; ++k) {
@@ -109,19 +110,31 @@ bool decode_image(const std::uint8_t* bytes, std::uint32_t size, DecodedImage& o
 bool load_surface_from_memory(GraphicsDevice& device, Texture* texture,
     const std::int32_t* destination_rect, const std::uint8_t* bytes, std::uint32_t size,
     const std::int32_t* source_rect, std::uint32_t filter) {
+    if (!texture || !bytes || !size) return false;
     DecodedImage image;
     if (!decode_image(bytes, size, image)) return false;
     std::int32_t full_source[]{0, 0, std::int32_t(image.width), std::int32_t(image.height)};
     if (!source_rect) source_rect = full_source;
-    std::int32_t full_destination[]{0, 0, source_rect[2] - source_rect[0], source_rect[3] - source_rect[1]};
+    const auto tw = std::int32_t(device.texture_width(texture));
+    const auto th = std::int32_t(device.texture_height(texture));
+    // A null destination rectangle is bounded by the surface, not by the
+    // encoded PNG. Manual PNGs contain a 1024-wide padded atlas, while their
+    // dynamic surface is only 768 wide. FILTER_NONE copies the visible crop.
+    std::int32_t full_destination[]{0, 0, tw, th};
     if (!destination_rect) destination_rect = full_destination;
+    if (source_rect[0] < 0 || source_rect[1] < 0 ||
+        source_rect[2] > std::int32_t(image.width) || source_rect[3] > std::int32_t(image.height) ||
+        source_rect[2] <= source_rect[0] || source_rect[3] <= source_rect[1] ||
+        destination_rect[0] < 0 || destination_rect[1] < 0 ||
+        destination_rect[2] > tw || destination_rect[3] > th ||
+        destination_rect[2] <= destination_rect[0] || destination_rect[3] <= destination_rect[1]) return false;
     const auto lock = device.lock(texture);
     if (!lock.pixels) return false;
     bool done = false;
     if (filter == filter_none) {
-        const int width = destination_rect[2] - destination_rect[0];
-        const int height = destination_rect[3] - destination_rect[1];
-        if (width == source_rect[2] - source_rect[0] && height == source_rect[3] - source_rect[1] &&
+        const int width = std::min(destination_rect[2] - destination_rect[0], source_rect[2] - source_rect[0]);
+        const int height = std::min(destination_rect[3] - destination_rect[1], source_rect[3] - source_rect[1]);
+        if (width > 0 && height > 0 &&
             source_rect[0] >= 0 && source_rect[1] >= 0 && source_rect[2] <= (std::int32_t)image.width &&
             source_rect[3] <= (std::int32_t)image.height) {
             for (int y = 0; y < height; ++y) {

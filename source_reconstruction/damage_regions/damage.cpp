@@ -34,15 +34,21 @@ int calculate_damage(HitCtrlInf& owner,const sprite::Vec3& position,const sprite
             if(enemy&&(region.flags&0x20)){write(enemy,0x22c,read<unsigned>(enemy,0x22c)|2u);continue;}
         }
         if(hit_flag&&(region.flags&0x10))*hit_flag=1;
-        if(region.damage_limit<9999999&&region.damage_limit<=region.total_damage)retire(region);
+        const bool expired=region.damage_limit<9999999&&region.damage_limit<=region.total_damage;
+        const auto handle=region.handle;
+        const auto contact=region.motion.position;
+        const auto flags=region.flags;
         auto current=region.damage;
         if(!preview){region.total_damage=add(region.total_damage,region.damage);if(region.hit_callback){region.callback_target=target;const auto result=host.hit_callback(region,position,size,angle,radius);if(result>=0)current=result;}}
-        if(region.damage_group>0&&region.damage_group<5)group_effective[region.damage_group]=current;
-        total=add(total,current);if(hit_position)*hit_position=region.motion.position;
+        // Shot hit callbacks can retire and free this region, or recycle its
+        // pool slot. Finish accounting from the contact captured before dispatch.
+        if(expired)if(auto* remaining=owner.find(handle))retire(*remaining);
+        if(group>0&&group<5)group_effective[group]=current;
+        total=add(total,current);if(hit_position)*hit_position=contact;
         if(total>0)if(auto* enemy=enemy_in(*owner.context,target)){
             const auto reward=(read<unsigned>(enemy,0x354)&0x40000000u)?recovered::signed_bits(static_cast<unsigned>(total)*10u):total;
-            host.damage_reward(midpoint(region.motion.position,position),reward);
-            if(region.flags&0x40)write(enemy,0x358,read<unsigned>(enemy,0x358)|0x10u);
+            host.damage_reward(midpoint(contact,position),reward);
+            if(flags&0x40)write(enemy,0x358,read<unsigned>(enemy,0x358)|0x10u);
         }
     }
     if(player_damage_cap(owner.context->objects_04[0],game_session::overlay_owner(0),*game_session::context(0).current_player)<total)

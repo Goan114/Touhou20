@@ -27,16 +27,7 @@ template<int C>void YellowWeapon<C>::start_phase(){n::timer_set(phase_age,phase_
 template<int C>int YellowWeapon<C>::end_phase(){n::timer_set(end_timer,60);yellow_state(C).phase_animation=weapon_services().spawn_player_animation(C==0?"pl00":"pl01",C==0?31:27,player().position_614);active=0;return 0;}
 template<int C>int YellowWeapon<C>::cancelled_bullet(const sprite::Vec3& position,bool passive_callback){weapon_services().fire_shots_at_position(n::signed_bits(static_cast<unsigned>(stone_id)*20u+15u),0,0,position);if(passive_callback)passive=1;return 1;}
 template<int C>void YellowWeapon<C>::update_main(){if(end_timer.current>0){const float radius=(60.f-end_timer.current_f)*10.f;
-#ifdef TH_SDL3
- // All bullets must still be cleared, but a dense wave can otherwise spawn
- // thousands of counter-shots at once and exhaust WebAssembly/ANM pools.
- const unsigned active=player().shots.field_12464;
- const unsigned budget=active>=512?0:std::min(96u,512u-active);
- unsigned spawned=0;
- weapon_services().cancel_filtered(player().position_614,radius,[this,&spawned,budget](const sprite::Vec3& p){if(spawned<budget){++spawned;cancelled_bullet(p,false);}return 1;});
-#else
  weapon_services().cancel_filtered(player().position_614,radius,[this](const sprite::Vec3& p){return cancelled_bullet(p,false);});
-#endif
  frame_environment().clear_lasers(player().position_614,radius);n::timer_add(end_timer,-1.f,state::timer_rate);}}
 template<int C>void YellowWeapon<C>::update_passive(){passive=0;if(passive_timer.current!=passive_timer.previous)for(int index=0;index<player_entity::power_level(stats());++index){const int period=stats().bytes_2c[3]?22:16;if(passive_timer.current%period==index*4){const auto p=player().options[index].previous_position;weapon_services().cancel_filtered(p,3.f,[this](const sprite::Vec3& position){return cancelled_bullet(position,true);});}}n::timer_tick(passive_timer,state::timer_rate);}
 template<int C>void YellowWeapon<C>::update_options(int level){auto& s=yellow_state(C);auto& host=weapon_services();for(int index=0;index<level;++index){const auto p=player().options[index].previous_position;if(!s.animation_handles[index]){effects::Parameters params;effects::construct_parameters(params);params.vector_00=player().position_614;s.animation_handles[index]=host.spawn_effect(8,params);host.animation(s.animation_handles[index]).base.vector_50={32.f,1.f};}host.animation_position(s.animation_handles[index],p);if(cooldown)cooldown=n::signed_bits(static_cast<unsigned>(cooldown)-1u);if(!cooldown)cooldown=n::signed_bits(static_cast<unsigned>(cooldown)+static_cast<unsigned>(host.cancel_counted(p,2.f)));}for(int index=level;index<4;++index){host.delete_animation(s.animation_handles[index]);host.retire_damage(s.damage_handles[index]);}}

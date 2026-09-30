@@ -21,7 +21,17 @@ Region* HitCtrlInf::allocate(){
     else {void* memory=::operator new(sizeof(Region),std::nothrow);if(!memory)return nullptr;std::memset(memory,0,sizeof(Region));region=::new(memory)Region;construct_region(*region);scheduler::initialize_link(region->link,reinterpret_cast<scheduler::Node*>(region));scheduler::append(active,region->link);region->handle=next_handle|0x1000000u;damage::select_context(*region,0);}
     advance_handle();return region;
 }
-Region* HitCtrlInf::find(std::uint32_t handle) noexcept {if(!handle)return nullptr;scheduler::Iterator it(active.sentinel.next);while(it.current){auto* region=reinterpret_cast<Region*>(it.current->value);if(region->handle==handle)return region;it.advance();}return nullptr;}
+Region* HitCtrlInf::find(std::uint32_t handle) noexcept {
+    if(!handle)return nullptr;
+    // Lookup never mutates the list. An observing Iterator here would replace
+    // the damage dispatcher's observer during a hit callback; retirement would
+    // then leave that dispatcher pointing at a freed heap region.
+    for(auto* link=active.sentinel.next;link;link=link->next){
+        auto* region=reinterpret_cast<Region*>(link->value);
+        if(region->handle==handle)return region;
+    }
+    return nullptr;
+}
 void HitCtrlInf::detach(Region& region) noexcept {scheduler::unlink(region.link);if(!(region.handle&0x1000000u)){scheduler::insert_after(free.sentinel,region.link);region.link.owner=&free;if(free.tail==&free.sentinel)free.tail=&region.link;}}
 int HitCtrlInf::update(){std::uint32_t count=0;scheduler::Iterator it(active.sentinel.next);while(it.current){damage::update(*reinterpret_cast<Region*>(it.current->value));++count;it.advance();}visited_regions=count;recovered::timer_tick(age,state::timer_rate);return 1;}
 HitCtrlInf* controller(std::int32_t index) noexcept {return static_cast<HitCtrlInf*>(game_session::context(index).object_28);}
